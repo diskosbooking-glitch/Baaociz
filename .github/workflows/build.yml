@@ -1,0 +1,49 @@
+name: Compilation Aociz SubShaper
+
+on:
+  push:
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: AocizSubShaper
+
+jobs:
+  macos:
+    name: Mac (AU + VST3)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configuration
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Compilation
+        run: cmake --build build --config Release --target AocizSubShaper_AU AocizSubShaper_VST3 -j 4
+
+      - name: Signature + emballage
+        run: |
+          set -e
+          ART="build/AocizSubShaper_artefacts/Release"
+          mkdir -p dist
+          cp -R "$ART/AU/Aociz SubShaper.component" dist/
+          cp -R "$ART/VST3/Aociz SubShaper.vst3" dist/
+          codesign --force --deep --sign - "dist/Aociz SubShaper.component"
+          codesign --force --deep --sign - "dist/Aociz SubShaper.vst3"
+          cp INSTALLER_MAC.command dist/
+          chmod +x dist/INSTALLER_MAC.command
+          cd dist && ditto -c -k --sequesterRsrc --keepParent . ../Aociz-SubShaper-Mac.zip
+
+      - name: Validation Audio Unit
+        continue-on-error: true
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "dist/Aociz SubShaper.component" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          sleep 3
+          auval -v aufx SbSh Aocz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Aociz-SubShaper-Mac
+          path: AocizSubShaper/Aociz-SubShaper-Mac.zip
