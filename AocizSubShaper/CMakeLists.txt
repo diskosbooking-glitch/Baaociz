@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(AocizSubShaper VERSION 0.1.0)
+project(Subshaper VERSION 0.2.1)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,12 +25,13 @@ endif()
 
 option(SUBSHAPER_COPY_AFTER_BUILD "Copier le plugin dans les dossiers système après compilation" OFF)
 
-juce_add_plugin(AocizSubShaper
+juce_add_plugin(Subshaper
     COMPANY_NAME                "Aociz"
     BUNDLE_ID                   "com.aociz.subshaper"
     PLUGIN_MANUFACTURER_CODE    Aocz
     PLUGIN_CODE                 SbSh
-    PRODUCT_NAME                "Aociz SubShaper"
+    PRODUCT_NAME                "Subshaper"
+    VERSION                     ${PROJECT_VERSION}
     FORMATS                     ${SUBSHAPER_FORMATS}
     IS_SYNTH                    FALSE
     NEEDS_MIDI_INPUT            FALSE
@@ -41,16 +42,16 @@ juce_add_plugin(AocizSubShaper
     VST3_CATEGORIES             Fx Distortion
     COPY_PLUGIN_AFTER_BUILD     ${SUBSHAPER_COPY_AFTER_BUILD})
 
-target_sources(AocizSubShaper PRIVATE
+target_sources(Subshaper PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp)
 
-target_compile_definitions(AocizSubShaper PUBLIC
+target_compile_definitions(Subshaper PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0)
 
-target_link_libraries(AocizSubShaper
+target_link_libraries(Subshaper
     PRIVATE
         juce::juce_audio_utils
         juce::juce_dsp

@@ -29,24 +29,24 @@ APVTS::ParameterLayout SubShaperProcessor::createLayout()
     xoverRange.setSkewForCentre (120.0f);
 
     p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { "mode", 1 }, "Mode",
-                     StringArray { "Saturer", String::fromUTF8 ("Résonner"), "Octave", String::fromUTF8 ("Synthèse"), "Repli" }, 0));
-    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "crossover", 1 }, "Coupure", xoverRange, 120.0f,
+                     StringArray { "Saturate", "Resonate", "Octave", "Synthesize", "Fold" }, 0));
+    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "crossover", 1 }, "Crossover", xoverRange, 120.0f,
                      AudioParameterFloatAttributes().withLabel ("Hz")));
-    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "amount", 1 }, String::fromUTF8 ("Intensité"),
+    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "amount", 1 }, "Amount",
                      NormalisableRange<float> (0.0f, 100.0f, 0.1f), 35.0f,
                      AudioParameterFloatAttributes().withLabel ("%")));
-    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "character", 1 }, String::fromUTF8 ("Caractère"),
+    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "character", 1 }, "Character",
                      NormalisableRange<float> (0.0f, 100.0f, 0.1f), 30.0f,
                      AudioParameterFloatAttributes().withLabel ("%")));
-    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "mix", 1 }, String::fromUTF8 ("Mélange"),
+    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "mix", 1 }, "Mix",
                      NormalisableRange<float> (0.0f, 100.0f, 0.1f), 100.0f,
                      AudioParameterFloatAttributes().withLabel ("%")));
-    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "output", 1 }, "Sortie",
+    p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { "output", 1 }, "Output",
                      NormalisableRange<float> (-18.0f, 18.0f, 0.1f), 0.0f,
                      AudioParameterFloatAttributes().withLabel ("dB")));
-    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "monoLow", 1 }, "Grave mono", true));
-    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "soloLow", 1 }, "Solo grave", false));
-    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "subCut", 1 }, "Coupe infra", true));
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "monoLow", 1 }, "Mono Low", true));
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "soloLow", 1 }, "Solo Low", false));
+    p.push_back (std::make_unique<AudioParameterBool> (ParameterID { "subCut", 1 }, "Sub Cut", true));
 
     return { p.begin(), p.end() };
 }

@@ -1,34 +1,40 @@
-# Aociz SubShaper — v0.1.0
+# Subshaper — v0.2.1
 
-Plugin de traitement du grave (AU / VST3). Sépare le signal en deux bandes
-(Linkwitz-Riley 4e ordre) et traite le grave en suréchantillonnage x4.
+Plugin de traitement du grave (AU / VST3) au look synthé modulaire.
+Sépare le signal en deux bandes (Linkwitz-Riley 4e ordre) et traite le grave
+en suréchantillonnage x4.
 
-![Aperçu](docs/apercu.png)
+![Aperçu](docs/apercu-octave.png)
 
 ## Modes
-| Mode      | Intensité     | Caractère                         |
-|-----------|---------------|-----------------------------------|
-| Saturer   | Drive         | Asymétrie (harmoniques paires)    |
-| Résonner  | Résonance     | Fréquence du pic (30–200 Hz)      |
-| Octave    | Niveau du sub | Tonalité du sub                   |
-| Synthèse  | Niveau sinus  | 0 = ajouté, 100 = remplace        |
-| Repli     | Nombre de replis | Asymétrie                      |
+| Mode       | Amount (intensité) | Character (caractère)          |
+|------------|--------------------|--------------------------------|
+| Saturate   | Drive              | Asymétrie (harmoniques paires) |
+| Resonate   | Resonance          | Fréquence du pic (30–200 Hz)   |
+| Octave     | Sub level          | Tonalité du sub                |
+| Synthesize | Sine level         | 0 = ajouté, 100 = remplace     |
+| Fold       | Folds              | Asymétrie                      |
 
-Potards communs : Coupure (40–400 Hz), Mélange, Sortie.
-Outils : Grave mono, Solo grave, Coupe < 25 Hz.
+Autres réglages : Crossover (coupure), Mix (mélange), Output (sortie).
+Tools : Mono Low (grave mono), Solo Low (solo grave), Sub Cut < 25 Hz.
 
-## Obtenir l'AU (sans rien installer)
-1. Sur github.com : **New repository** (privé si tu veux) → **uploading an existing file**.
-2. Dans le Finder, appuie sur **Cmd + Maj + .** pour afficher le dossier caché `.github`,
-   puis glisse **tout le contenu** de ce dossier (y compris `.github`) → **Commit changes**.
-3. Onglet **Actions** : la compilation démarre (≈ 10–15 min).
-4. Coche verte → ouvre l'exécution → section **Artifacts** → télécharge **Aociz-SubShaper-Mac**.
-5. Dézippe (deux fois), puis **clic droit → Ouvrir** sur `INSTALLER_MAC.command`.
-6. Relance Ableton (Réglages → Plug-ins → Rescan) ou FL Studio (Options → Manage plugins → Find more plugins).
+## Mettre à jour le plugin
+1. GitHub → dossier **AocizSubShaper** → **Add file → Upload files**.
+2. Glisse le contenu de ce dossier → **Commit changes**.
+3. Onglet **Actions** → coche verte → **Artifacts** → **Subshaper-Mac**.
+4. Installe le `.pkg` (voir ci-dessous).
+
+Pour une nouvelle version, change seulement le numéro dans `CMakeLists.txt`
+(ligne `project(Subshaper VERSION x.y.z)`).
+
+## Installer
+Double-clic sur `Subshaper-x.y.z.pkg`, ou dans le Terminal :
+
+    sudo installer -pkg ~/Downloads/Subshaper-0.2.1.pkg -target /
+
+L'installateur supprime les anciennes versions (dont « Aociz SubShaper »).
+Ensuite : Ableton → Réglages → Plug-ins → Rescan ;
+FL Studio → Options → Manage plugins → Find more plugins.
 
 ## Compilation locale (optionnel)
-Xcode + `brew install cmake`, puis `./build.sh` : le plugin est copié automatiquement.
-
-## Licence JUCE
-JUCE 8 : AGPLv3 ou licence commerciale (gratuite sous un certain seuil de revenus).
-À vérifier sur juce.com avant toute vente du plugin.
+Xcode + `brew install cmake`, puis `bash build.sh`.

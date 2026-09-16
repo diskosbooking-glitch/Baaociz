@@ -5,22 +5,53 @@
 #include "PluginProcessor.h"
 
 // ----------------------------------------------------------------------------
-//  Look & feel monochrome Aociz
+//  Palette « synthé modulaire »
 // ----------------------------------------------------------------------------
-class AocizLookAndFeel : public juce::LookAndFeel_V4
+namespace palette
+{
+    const juce::Colour panelTop    { 0xff26272e };
+    const juce::Colour panelBottom { 0xff1b1c21 };
+    const juce::Colour screen      { 0xff0b0c10 };
+    const juce::Colour edge        { 0xff3a3c45 };
+    const juce::Colour grid        { 0xff1e2028 };
+    const juce::Colour textDim     { 0xff8d909a };
+    const juce::Colour text        { 0xffeef0f4 };
+
+    const juce::Colour red    { 0xffff4d4d };
+    const juce::Colour violet { 0xffb06cff };
+    const juce::Colour blue   { 0xff3d9bff };
+    const juce::Colour green  { 0xff2ee59d };
+    const juce::Colour orange { 0xffff9f1c };
+    const juce::Colour cyan   { 0xff22d3ee };
+    const juce::Colour pink   { 0xffff4d8d };
+    const juce::Colour amber  { 0xffffc21a };
+    const juce::Colour lime   { 0xffa3e635 };
+    const juce::Colour indigo { 0xff7c6cff };
+
+    inline juce::Colour modeColour (int mode)
+    {
+        static const juce::Colour c[] { red, violet, blue, green, orange };
+        return c[juce::jlimit (0, 4, mode)];
+    }
+}
+
+void setAccent (juce::Component&, juce::Colour);
+juce::Colour getAccent (const juce::Component&, juce::Colour fallback = palette::cyan);
+
+// ----------------------------------------------------------------------------
+class ModularLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
-    AocizLookAndFeel();
+    ModularLookAndFeel();
     void drawRotarySlider (juce::Graphics&, int x, int y, int w, int h, float pos,
                            float startAngle, float endAngle, juce::Slider&) override;
     void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&,
                                bool highlighted, bool down) override;
     void drawButtonText (juce::Graphics&, juce::TextButton&, bool highlighted, bool down) override;
     void drawToggleButton (juce::Graphics&, juce::ToggleButton&, bool highlighted, bool down) override;
+    juce::Font getLabelFont (juce::Label&) override;
 };
 
-// ----------------------------------------------------------------------------
-//  Analyseur de spectre
 // ----------------------------------------------------------------------------
 class SpectrumView : public juce::Component, private juce::Timer
 {
@@ -45,18 +76,15 @@ private:
 };
 
 // ----------------------------------------------------------------------------
-//  Potard + libellé
-// ----------------------------------------------------------------------------
 struct LabelledKnob : public juce::Component
 {
     LabelledKnob();
     void resized() override;
+    void setColour (juce::Colour c);
     juce::Slider slider;
     juce::Label label;
 };
 
-// ----------------------------------------------------------------------------
-//  Éditeur
 // ----------------------------------------------------------------------------
 class SubShaperEditor : public juce::AudioProcessorEditor
 {
@@ -68,13 +96,16 @@ public:
 
 private:
     void updateModeUI (int mode);
+    void drawRail (juce::Graphics&, juce::Rectangle<float>);
+    void drawJack (juce::Graphics&, juce::Point<float>, const juce::String&);
 
     SubShaperProcessor& proc;
-    AocizLookAndFeel lnf;
+    ModularLookAndFeel lnf;
     SpectrumView spectrum;
 
     juce::OwnedArray<juce::TextButton> modeButtons;
     std::unique_ptr<juce::ParameterAttachment> modeAttachment;
+    int currentMode = 0;
 
     LabelledKnob crossoverKnob, amountKnob, characterKnob, mixKnob, outputKnob;
     using SliderAtt = juce::AudioProcessorValueTreeState::SliderAttachment;

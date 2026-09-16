@@ -1,0 +1,4 @@
+#!/bin/bash
+# Force macOS à relire la liste des Audio Units
+killall -9 AudioComponentRegistrar 2>/dev/null
+exit 0
