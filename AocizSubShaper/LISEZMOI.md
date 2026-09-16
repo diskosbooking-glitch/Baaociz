@@ -1,40 +1,43 @@
-# Subshaper — v0.2.1
+# Subshaper — v0.3.0
 
-Plugin de traitement du grave (AU / VST3) au look synthé modulaire.
-Sépare le signal en deux bandes (Linkwitz-Riley 4e ordre) et traite le grave
-en suréchantillonnage x4.
+Plugin de traitement du grave (AU / VST3), look synthé modulaire pastel.
 
-![Aperçu](docs/apercu-octave.png)
+![Aperçu](docs/apercu-atl-knock.png)
 
-## Modes
-| Mode       | Amount (intensité) | Character (caractère)          |
-|------------|--------------------|--------------------------------|
-| Saturate   | Drive              | Asymétrie (harmoniques paires) |
-| Resonate   | Resonance          | Fréquence du pic (30–200 Hz)   |
-| Octave     | Sub level          | Tonalité du sub                |
-| Synthesize | Sine level         | 0 = ajouté, 100 = remplace     |
-| Fold       | Folds              | Asymétrie                      |
+## Architecture
+Le grave (sous la fréquence CROSSOVER) passe dans une chaîne de modules cumulables :
 
-Autres réglages : Crossover (coupure), Mix (mélange), Output (sortie).
-Tools : Mono Low (grave mono), Solo Low (solo grave), Sub Cut < 25 Hz.
+GEN → TONE → DRIVE → SHAPE → PUMP, puis WIDTH sur la partie aiguë.
 
-## Mettre à jour le plugin
+| Module | Rôle | Réglages |
+|---|---|---|
+| GEN   | Crée un sub (Octave dessous ou Sine) | Level, Tone/Replace, Key Lock |
+| TONE  | Résonance accordée sur la note KEY | Amount, Q, Harmonic (1x à 4x) |
+| DRIVE | Saturation (Tape, Tube, Hard, Fold) | Drive, Color, Focus (note KEY), Mix |
+| SHAPE | Attaque / queue du grave | Attack, Sustain |
+| PUMP  | Ducking calé sur le tempo | Rate, Depth, Release |
+| WIDTH | Largeur stéréo au-dessus de la coupure | Width |
+
+KEY : potard cranté sur les 12 notes + octave (OCT 1 = zone 808).
+TUNER : affiche la note jouée par la basse et l'écart en cents.
+MAIN : Input, Crossover, Mix, Output, Mono Low, Solo Low, Sub Cut 25,
+Delta (écoute de la différence), Gain Match, HQ (x4 / x2).
+Barre du haut : presets, Save, comparaison A/B, Undo/Redo, taille de fenêtre.
+
+## Presets
+Trap : ATL Knock, Crushed 808, Drill Glide, R&B Clean Sub, Phone Speaker Rescue
+House : Deep House Sine, Tech House Roll, Bass House Growl, Garage Wobble Sub
+Utility : Init, Mono Fix, Sub Tighten
+Les presets ne changent jamais la note KEY.
+Presets utilisateur : ~/Library/Application Support/Subshaper/Presets
+
+## Mise à jour
 1. GitHub → dossier **AocizSubShaper** → **Add file → Upload files**.
-2. Glisse le contenu de ce dossier → **Commit changes**.
-3. Onglet **Actions** → coche verte → **Artifacts** → **Subshaper-Mac**.
-4. Installe le `.pkg` (voir ci-dessous).
+2. Glisse Source, ci, docs, CMakeLists.txt, build.sh, LISEZMOI.md → **Commit changes**.
+3. **Actions** → coche verte → **Artifacts** → **Subshaper-Mac**.
 
-Pour une nouvelle version, change seulement le numéro dans `CMakeLists.txt`
-(ligne `project(Subshaper VERSION x.y.z)`).
+## Installation (Terminal)
+    sudo installer -pkg ~/Downloads/Subshaper-0.3.0.pkg -target /
 
-## Installer
-Double-clic sur `Subshaper-x.y.z.pkg`, ou dans le Terminal :
-
-    sudo installer -pkg ~/Downloads/Subshaper-0.2.1.pkg -target /
-
-L'installateur supprime les anciennes versions (dont « Aociz SubShaper »).
-Ensuite : Ableton → Réglages → Plug-ins → Rescan ;
+Puis Ableton → Réglages → Plug-ins → Rescan ;
 FL Studio → Options → Manage plugins → Find more plugins.
-
-## Compilation locale (optionnel)
-Xcode + `brew install cmake`, puis `bash build.sh`.

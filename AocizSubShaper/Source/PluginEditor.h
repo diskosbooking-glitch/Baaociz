@@ -5,38 +5,32 @@
 #include "PluginProcessor.h"
 
 // ----------------------------------------------------------------------------
-//  Palette « synthé modulaire »
+//  Palette pastel
 // ----------------------------------------------------------------------------
 namespace palette
 {
-    const juce::Colour panelTop    { 0xff26272e };
-    const juce::Colour panelBottom { 0xff1b1c21 };
-    const juce::Colour screen      { 0xff0b0c10 };
-    const juce::Colour edge        { 0xff3a3c45 };
-    const juce::Colour grid        { 0xff1e2028 };
-    const juce::Colour textDim     { 0xff8d909a };
-    const juce::Colour text        { 0xffeef0f4 };
+    const juce::Colour panelTop    { 0xff2d2c33 };
+    const juce::Colour panelBottom { 0xff232228 };
+    const juce::Colour card        { 0xff1e1d23 };
+    const juce::Colour screen      { 0xff141318 };
+    const juce::Colour edge        { 0xff403e48 };
+    const juce::Colour grid        { 0xff26252d };
+    const juce::Colour textDim     { 0xff8f8c99 };
+    const juce::Colour text        { 0xfff1eff5 };
+    const juce::Colour ink         { 0xff1c1b21 };
 
-    const juce::Colour red    { 0xffff4d4d };
-    const juce::Colour violet { 0xffb06cff };
-    const juce::Colour blue   { 0xff3d9bff };
-    const juce::Colour green  { 0xff2ee59d };
-    const juce::Colour orange { 0xffff9f1c };
-    const juce::Colour cyan   { 0xff22d3ee };
-    const juce::Colour pink   { 0xffff4d8d };
-    const juce::Colour amber  { 0xffffc21a };
-    const juce::Colour lime   { 0xffa3e635 };
-    const juce::Colour indigo { 0xff7c6cff };
-
-    inline juce::Colour modeColour (int mode)
-    {
-        static const juce::Colour c[] { red, violet, blue, green, orange };
-        return c[juce::jlimit (0, 4, mode)];
-    }
+    const juce::Colour sky      { 0xffa7cff2 };
+    const juce::Colour lavender { 0xffc0b0f2 };
+    const juce::Colour peach    { 0xffffc2a1 };
+    const juce::Colour butter   { 0xfff0e0a0 };
+    const juce::Colour rose     { 0xfff2abc8 };
+    const juce::Colour mint     { 0xffa3e3c6 };
+    const juce::Colour aqua     { 0xff9fd9df };
+    const juce::Colour coral    { 0xfff5a9a0 };
 }
 
 void setAccent (juce::Component&, juce::Colour);
-juce::Colour getAccent (const juce::Component&, juce::Colour fallback = palette::cyan);
+juce::Colour getAccent (const juce::Component&, juce::Colour fallback = palette::sky);
 
 // ----------------------------------------------------------------------------
 class ModularLookAndFeel : public juce::LookAndFeel_V4
@@ -45,10 +39,13 @@ public:
     ModularLookAndFeel();
     void drawRotarySlider (juce::Graphics&, int x, int y, int w, int h, float pos,
                            float startAngle, float endAngle, juce::Slider&) override;
-    void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&,
-                               bool highlighted, bool down) override;
-    void drawButtonText (juce::Graphics&, juce::TextButton&, bool highlighted, bool down) override;
-    void drawToggleButton (juce::Graphics&, juce::ToggleButton&, bool highlighted, bool down) override;
+    void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&, bool, bool) override;
+    void drawButtonText (juce::Graphics&, juce::TextButton&, bool, bool) override {}
+    void drawToggleButton (juce::Graphics&, juce::ToggleButton&, bool, bool) override;
+    void drawComboBox (juce::Graphics&, int w, int h, bool down, int bx, int by, int bw, int bh, juce::ComboBox&) override;
+    void positionComboBoxText (juce::ComboBox&, juce::Label&) override;
+    juce::Font getComboBoxFont (juce::ComboBox&) override;
+    juce::Font getPopupMenuFont() override;
     juce::Font getLabelFont (juce::Label&) override;
 };
 
@@ -59,10 +56,11 @@ public:
     explicit SpectrumView (SubShaperProcessor&);
     ~SpectrumView() override { stopTimer(); }
     void paint (juce::Graphics&) override;
+    void resized() override { smoothed.fill (-100.0f); }
 
 private:
     void timerCallback() override;
-    float xForFreq (float hz) const;
+    float xForFreq (float hz, float w) const;
 
     SubShaperProcessor& proc;
     static constexpr int fftOrder = 12;
@@ -76,13 +74,133 @@ private:
 };
 
 // ----------------------------------------------------------------------------
+class TunerView : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
+{
+public:
+    explicit TunerView (SubShaperProcessor&);
+    ~TunerView() override { stopTimer(); }
+    void paint (juce::Graphics&) override;
+
+private:
+    void timerCallback() override;
+    float detect (double fs);
+
+    SubShaperProcessor& proc;
+    static constexpr int bufSize = 3072;
+    std::array<float, bufSize> ring {};
+    std::vector<float> scratch, diff;
+    float freq = 0.0f, shownFreq = 0.0f;
+    int holdFrames = 0;
+};
+
+// ----------------------------------------------------------------------------
+class MeterView : public juce::Component, private juce::Timer
+{
+public:
+    explicit MeterView (SubShaperProcessor& p) : proc (p) { startTimerHz (30); }
+    ~MeterView() override { stopTimer(); }
+    void paint (juce::Graphics&) override;
+
+private:
+    void timerCallback() override;
+    SubShaperProcessor& proc;
+    float levelL = 0.0f, levelR = 0.0f;
+    int clipHold = 0;
+};
+
+// ----------------------------------------------------------------------------
 struct LabelledKnob : public juce::Component
 {
     LabelledKnob();
     void resized() override;
-    void setColour (juce::Colour c);
+    void setAccentColour (juce::Colour c);
     juce::Slider slider;
     juce::Label label;
+};
+
+// ----------------------------------------------------------------------------
+class ChoiceSegments : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    ChoiceSegments (juce::RangedAudioParameter&, const juce::StringArray& labels, juce::Colour accent,
+                    bool vertical, juce::UndoManager*);
+    void resized() override;
+
+private:
+    juce::OwnedArray<juce::TextButton> buttons;
+    std::unique_ptr<juce::ParameterAttachment> attachment;
+    bool vertical;
+};
+
+// ----------------------------------------------------------------------------
+struct ModuleUI
+{
+    juce::String name;
+    juce::Colour colour;
+    juce::Rectangle<int> bounds;
+};
+
+class Panel : public juce::Component, private juce::Timer
+{
+public:
+    explicit Panel (SubShaperProcessor&);
+    ~Panel() override;
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+    static constexpr int baseW = 1180, baseH = 770;
+    std::function<void (float)> onScaleChange;
+
+private:
+    void timerCallback() override;
+    void refreshPresetBox();
+    void savePresetDialog();
+    void stepPreset (int delta);
+    void attachKnob (LabelledKnob&, const juce::String& id, const juce::String& label, juce::Colour, const juce::String& tip);
+    void attachToggle (juce::ToggleButton&, const juce::String& id, const juce::String& text, juce::Colour, const juce::String& tip);
+    void drawRail (juce::Graphics&, juce::Rectangle<float>);
+    void drawCard (juce::Graphics&, juce::Rectangle<float>, juce::Colour, const juce::String& tab);
+
+    SubShaperProcessor& proc;
+    ModularLookAndFeel lnf;
+
+    SpectrumView spectrum;
+    TunerView tuner;
+    MeterView meter;
+
+    // Barre du haut
+    juce::TextButton prevBtn { "<" }, nextBtn { ">" }, saveBtn { "SAVE" },
+                     slotA { "A" }, slotB { "B" }, copyBtn { "COPY" },
+                     undoBtn { "UNDO" }, redoBtn { "REDO" };
+    juce::ComboBox presetBox, scaleBox;
+    juce::Array<juce::File> userFiles;
+
+    // KEY
+    LabelledKnob keyKnob;
+    std::unique_ptr<ChoiceSegments> octaveSeg;
+    juce::Label keyReadout;
+
+    // Modules
+    juce::ToggleButton genOn, toneOn, driveOn, shapeOn, pumpOn, widthOn, keyLockBtn;
+    std::unique_ptr<ChoiceSegments> genTypeSeg, driveTypeSeg, pumpRateSeg;
+    LabelledKnob genLevel, genTone, toneAmt, toneQ, toneHarm, drive, color, focus, driveMix,
+                 attack, sustain, pumpDepth, pumpShape, width;
+    juce::Label toneFreqLabel, shapeInfo, pumpInfo, widthInfo;
+
+    // Global
+    LabelledKnob inGain, crossover, mix, output;
+    juce::ToggleButton monoLow, soloLow, subCut, delta, gainMatch, hq;
+
+    using SliderAtt = juce::AudioProcessorValueTreeState::SliderAttachment;
+    using ButtonAtt = juce::AudioProcessorValueTreeState::ButtonAttachment;
+    juce::OwnedArray<SliderAtt> sliderAtts;
+    juce::OwnedArray<ButtonAtt> buttonAtts;
+
+    std::vector<ModuleUI> modules;
+    juce::String lastPresetName;
+    int lastGenType = -1;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Panel)
 };
 
 // ----------------------------------------------------------------------------
@@ -91,31 +209,14 @@ class SubShaperEditor : public juce::AudioProcessorEditor
 public:
     explicit SubShaperEditor (SubShaperProcessor&);
     ~SubShaperEditor() override;
-    void paint (juce::Graphics&) override;
     void resized() override;
 
 private:
-    void updateModeUI (int mode);
-    void drawRail (juce::Graphics&, juce::Rectangle<float>);
-    void drawJack (juce::Graphics&, juce::Point<float>, const juce::String&);
-
+    void applyScale (float s);
     SubShaperProcessor& proc;
-    ModularLookAndFeel lnf;
-    SpectrumView spectrum;
-
-    juce::OwnedArray<juce::TextButton> modeButtons;
-    std::unique_ptr<juce::ParameterAttachment> modeAttachment;
-    int currentMode = 0;
-
-    LabelledKnob crossoverKnob, amountKnob, characterKnob, mixKnob, outputKnob;
-    using SliderAtt = juce::AudioProcessorValueTreeState::SliderAttachment;
-    std::unique_ptr<SliderAtt> crossoverAtt, amountAtt, characterAtt, mixAtt, outputAtt;
-
-    juce::ToggleButton monoLowBtn, soloLowBtn, subCutBtn;
-    using ButtonAtt = juce::AudioProcessorValueTreeState::ButtonAttachment;
-    std::unique_ptr<ButtonAtt> monoLowAtt, soloLowAtt, subCutAtt;
-
-    juce::Label modeHint;
+    Panel panel;
+    juce::TooltipWindow tooltips { this, 500 };
+    float scale = 1.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SubShaperEditor)
 };
