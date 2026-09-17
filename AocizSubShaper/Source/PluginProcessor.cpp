@@ -272,6 +272,7 @@ void SubShaperProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     double beatPos = playing ? ppq : freePhaseBeats;
 
     float peakL = meterL.load(), peakR = meterR.load();
+    float lastPumpGain = 1.0f;
 
     for (int i = 0; i < n; ++i)
     {
@@ -291,6 +292,7 @@ void SubShaperProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         const float curve = std::sin (t * juce::MathConstants<float>::halfPi);
         const float pumpGain = 1.0f - pumpEn * depth * (1.0f - curve * curve);
         beatPos += beatsPerSample;
+        lastPumpGain = pumpGain;
 
         float dry[2], hi[2], hiRef[2], lowOut[2];
         for (int ch = 0; ch < 2; ++ch)
@@ -348,6 +350,7 @@ void SubShaperProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         peakR = juce::jmax (peakR, std::abs (out[numCh > 1 ? 1 : 0] * finalGain));
     }
     freePhaseBeats = std::fmod (beatPos, 16.0);
+    pumpGainNow = lastPumpGain;
     meterL = peakL;
     meterR = peakR;
 

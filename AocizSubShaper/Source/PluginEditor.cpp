@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include <complex>
 
 void setAccent (juce::Component& c, juce::Colour col)
 {
@@ -243,8 +244,32 @@ SpectrumView::SpectrumView (SubShaperProcessor& p) : proc (p)
     startTimerHz (30);
 }
 
+void SpectrumView::setFocus (const juce::String& id, bool hold)
+{
+    if (hold)
+    {
+        focusId = id;
+        focusAlpha = 1.0f;
+        focusHold = true;
+    }
+    else if (id == focusId)
+    {
+        focusHold = false;
+    }
+}
+
+void SpectrumView::flash (const juce::String& id)
+{
+    if (focusHold && id != focusId) return;
+    focusId = id;
+    focusAlpha = 1.0f;
+}
+
 void SpectrumView::timerCallback()
 {
+    if (! focusHold)
+        focusAlpha = juce::jmax (0.0f, focusAlpha - 0.035f);
+
     auto& fifo = proc.analyserFifo;
     const int available = fifo.getNumReady();
     if (available <= 0) { repaint(); return; }
@@ -355,6 +380,8 @@ void SpectrumView::paint (juce::Graphics& g)
         g.strokePath (curve, juce::PathStrokeType (1.5f));
     }
 
+    drawOverlays (g, w, h);
+
     // Coupure
     juce::Path dashed, line;
     line.startNewSubPath (xx, 0.0f);
@@ -419,6 +446,284 @@ void SpectrumView::paint (juce::Graphics& g)
 
     g.setColour (palette::edge);
     g.drawRoundedRectangle (bounds.reduced (0.5f), 8.0f, 1.4f);
+}
+
+
+// ----------------------------------------------------------------------------
+//  Calques : chaque module dessine son action dans sa couleur
+// ----------------------------------------------------------------------------
+namespace
+{
+    // Réponse d'un passe-bande normalisé (module complexe)
+    std::complex<double> bandpass (double f, double f0, double q)
+    {
+        const double r = f / f0;
+        return 1.0 / std::complex<double> (1.0, q * (r - 1.0 / r));
+    }
+    // Poids de la bande grave (Linkwitz-Riley 4e ordre)
+    double lowWeight (double f, double fc) { const double r = f / fc; return 1.0 / (1.0 + r * r * r * r); }
+}
+
+void SpectrumView::drawOverlays (juce::Graphics& g, float w, float h)
+{
+    auto val = [this] (const char* id) { return proc.apvts.getRawParameterValue (id)->load(); };
+    auto on  = [&val] (const char* id) { return val (id) > 0.5f; };
+
+    const float refY = h * 0.42f;          // ligne 0 dB des courbes de réglage
+    const float pxPerDb = 4.2f;
+    const double fc = val ("crossover");
+    const double key = proc.getKeyFrequency();
+    const float played = playedFrequency ? playedFrequency() : 0.0f;
+    const double root = played > 20.0f ? played : key;
+    const float xx = xForFreq ((float) fc, w);
+
+    struct Layer { const char* id; juce::Colour col; bool enabled; };
+    const Layer layers[] {
+        { "gen",   palette::sky,      on ("genOn") },
+        { "tone",  palette::lavender, on ("toneOn") },
+        { "drive", palette::peach,    on ("driveOn") },
+        { "shape", palette::butter,   on ("shapeOn") },
+        { "pump",  palette::rose,     on ("pumpOn") },
+        { "width", palette::mint,     on ("widthOn") },
+    };
+
+    auto alphaFor = [this] (const juce::String& id, bool enabled)
+    {
+        const float f = focusId == id ? focusAlpha : 0.0f;
+        return juce::jmax (enabled ? 0.38f : 0.0f, f * (enabled ? 1.0f : 0.55f));
+    };
+    auto thickness = [this] (const juce::String& id) { return 1.3f + (focusId == id ? focusAlpha * 1.6f : 0.0f); };
+
+    // Trace une courbe de gain (dB) sur toute la largeur
+    auto curve = [&] (const std::function<double (double)>& gainDb, juce::Colour col, float alpha, float thick, bool fill)
+    {
+        juce::Path p;
+        for (int px = 0; px <= (int) w; px += 2)
+        {
+            const double f = 20.0 * std::pow (1000.0, px / (double) w);
+            const float y = juce::jlimit (4.0f, h - 4.0f, refY - (float) gainDb (f) * pxPerDb);
+            if (px == 0) p.startNewSubPath ((float) px, y); else p.lineTo ((float) px, y);
+        }
+        if (fill)
+        {
+            juce::Path f (p);
+            f.lineTo (w, refY);
+            f.lineTo (0.0f, refY);
+            f.closeSubPath();
+            g.setColour (col.withAlpha (alpha * 0.18f));
+            g.fillPath (f);
+        }
+        g.setColour (col.withAlpha (alpha));
+        g.strokePath (p, juce::PathStrokeType (thick, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    };
+
+    // Ligne de référence quand un réglage est mis en avant
+    if (focusAlpha > 0.0f && focusId.isNotEmpty())
+    {
+        g.setColour (palette::text.withAlpha (0.12f * focusAlpha));
+        g.drawHorizontalLine ((int) refY, 0.0f, w);
+    }
+
+    for (auto& L : layers)
+    {
+        const float a = alphaFor (L.id, L.enabled);
+        if (a <= 0.01f) continue;
+        const float t = thickness (L.id);
+        const juce::String id (L.id);
+
+        if (id == "gen")
+        {
+            const bool sine = val ("genType") > 0.5f;
+            const double level = val ("genLevel") * 0.01, tone = val ("genTone") * 0.01;
+            const double f0 = sine ? (on ("keyLock") ? key : root) : root * 0.5;
+            curve ([=] (double f)
+            {
+                const double lw = lowWeight (f, fc);
+                double lin = sine ? (1.0 - tone * lw) + level * 2.0 * std::abs (bandpass (f, f0, 6.0)) * lw
+                                  : 1.0 + level * 2.5 * std::abs (bandpass (f, f0, 3.0 + tone * 4.0)) * lw;
+                return 20.0 * std::log10 (juce::jmax (0.05, lin));
+            }, L.col, a, t, true);
+            const float x0 = xForFreq ((float) f0, w);
+            g.setColour (L.col.withAlpha (a));
+            g.fillEllipse (juce::Rectangle<float> (7.0f, 7.0f).withCentre ({ x0, refY - 10.0f }));
+        }
+        else if (id == "tone")
+        {
+            const double f0 = juce::jmin (key * (val ("toneHarm") + 1.0), 18000.0);
+            const double q = 1.0 + val ("toneQ") * 0.15;
+            const double k = val ("toneAmt") * 0.02;
+            curve ([=] (double f)
+            {
+                const double G = std::abs (1.0 + k * bandpass (f, f0, q));
+                const double lin = 1.0 + lowWeight (f, fc) * (G - 1.0);
+                return 20.0 * std::log10 (lin);
+            }, L.col, a, t, true);
+        }
+        else if (id == "drive")
+        {
+            const double drive = val ("drive") * 0.01, color = val ("color") * 0.01, focus = val ("focus") * 0.01;
+            if (focus > 0.0)
+                curve ([=] (double f) { return 20.0 * std::log10 (std::abs (1.0 + focus * 2.0 * bandpass (f, root, 2.0)) * lowWeight (f, fc) + (1.0 - lowWeight (f, fc))); },
+                       L.col, a * 0.8f, t, false);
+            // Peigne d'harmoniques générées
+            g.setColour (L.col.withAlpha (a));
+            for (int n = 2; n <= 10; ++n)
+            {
+                const double fn = root * n;
+                if (fn > 20000.0) break;
+                double db = drive * (20.0 - 1.8 * n);
+                if (n % 2 == 0) db += color * 8.0;
+                if (db <= 0.5) continue;
+                const float x = xForFreq ((float) fn, w);
+                const float y = refY - (float) db * pxPerDb;
+                g.drawLine (x, refY, x, y, t);
+                g.fillEllipse (juce::Rectangle<float> (t * 3.2f, t * 3.2f).withCentre ({ x, y }));
+                if (focusId == id && focusAlpha > 0.3f)
+                {
+                    g.setFont (bold (9.0f));
+                    g.drawText (juce::String (n) + "x", juce::Rectangle<float> (24.0f, 11.0f).withCentre ({ x, y - 9.0f }), juce::Justification::centred);
+                }
+            }
+        }
+        else if (id == "shape")
+        {
+            // Enveloppe schématique dans la zone grave
+            const double att = val ("attack") * 0.01, sus = val ("sustain") * 0.01;
+            const float x0 = 16.0f, x1 = juce::jmax (x0 + 60.0f, xx - 10.0f);
+            const float base = h - 12.0f, top = h * 0.55f;
+            const float span = x1 - x0;
+            const float peak = base - (base - top) * (float) (0.6 + 0.4 * att);
+            const float sustainY = base - (base - top) * (float) (0.35 + 0.25 * sus);
+            juce::Path env;
+            env.startNewSubPath (x0, base);
+            env.lineTo (x0 + span * 0.05f, peak);
+            env.quadraticTo (x0 + span * 0.12f, sustainY, x0 + span * 0.2f, sustainY);
+            env.lineTo (x0 + span * (float) (0.45 + 0.3 * sus), sustainY);
+            env.quadraticTo (x0 + span * (float) (0.6 + 0.3 * sus), base, x0 + span * (float) (0.75 + 0.2 * sus), base);
+            g.setColour (L.col.withAlpha (a * 0.15f));
+            g.fillPath (env);
+            g.setColour (L.col.withAlpha (a));
+            g.strokePath (env, juce::PathStrokeType (t, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        }
+        else if (id == "pump")
+        {
+            // Cycles de ducking + niveau courant
+            const float depth = val ("pumpDepth") * 0.01f;
+            const float release = 0.15f + val ("pumpShape") * 0.01f * 0.75f;
+            const float x0 = 16.0f, x1 = juce::jmax (x0 + 60.0f, xx - 16.0f);
+            const float base = h - 10.0f, height = h * 0.22f;
+            juce::Path p;
+            const int cycles = 4;
+            for (int i = 0; i <= 200; ++i)
+            {
+                const float ph = std::fmod ((float) i / 200.0f * (float) cycles, 1.0f);
+                const float tt = juce::jmin (1.0f, ph / release);
+                const float c = std::sin (tt * juce::MathConstants<float>::halfPi);
+                const float gain = 1.0f - depth * (1.0f - c * c);
+                const float x = x0 + (x1 - x0) * (float) i / 200.0f;
+                const float y = base - height * gain;
+                if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
+            }
+            g.setColour (L.col.withAlpha (a));
+            g.strokePath (p, juce::PathStrokeType (t));
+            const float now = proc.pumpGainNow.load();
+            auto bar = juce::Rectangle<float> (x1 + 4.0f, base - height * now, 5.0f, height * now);
+            g.fillRoundedRectangle (bar, 2.0f);
+        }
+        else if (id == "width")
+        {
+            const float wv = val ("width") * 0.01f;
+            g.setColour (L.col.withAlpha (a * 0.07f * juce::jmax (0.3f, wv)));
+            g.fillRect (xx, 0.0f, w - xx, h);
+            const float cy = h * 0.2f, cx = xx + (w - xx) * 0.5f;
+            const float half = (w - xx) * 0.08f * (0.4f + wv);
+            juce::Path arrow;
+            arrow.addArrow ({ cx, cy, cx - half, cy }, t, 9.0f, 8.0f);
+            arrow.addArrow ({ cx, cy, cx + half, cy }, t, 9.0f, 8.0f);
+            g.setColour (L.col.withAlpha (a));
+            g.fillPath (arrow);
+        }
+    }
+
+    // Réglages globaux (uniquement quand ils sont touchés)
+    if (focusAlpha > 0.01f)
+    {
+        const float a = focusAlpha;
+        if (focusId == "crossover")
+        {
+            curve ([=] (double f) { return 20.0 * std::log10 (juce::jmax (1.0e-3, lowWeight (f, fc))); }, palette::aqua, a, 2.2f, true);
+            curve ([=] (double f) { const double r = f / fc; return 20.0 * std::log10 (juce::jmax (1.0e-3, (r * r * r * r) / (1.0 + r * r * r * r))); },
+                   palette::aqua.withMultipliedBrightness (0.8f), a * 0.7f, 1.4f, false);
+        }
+        else if (focusId == "input" || focusId == "output")
+        {
+            const float db = val (focusId == "input" ? "inGain" : "output");
+            const float y = juce::jlimit (4.0f, h - 4.0f, refY - db * pxPerDb);
+            g.setColour (palette::aqua.withAlpha (a));
+            g.drawLine (0.0f, y, w, y, 2.0f);
+        }
+        else if (focusId == "mix")
+        {
+            const double m = val ("mix") * 0.01;
+            curve ([=] (double f) { return 20.0 * std::log10 (1.0 - (1.0 - m) * 0.85 * lowWeight (f, fc)); }, palette::aqua, a, 2.0f, true);
+        }
+        else if (focusId == "key")
+        {
+            g.setColour (palette::butter.withAlpha (a));
+            for (int n = 1; n <= 4; ++n)
+            {
+                const float x = xForFreq ((float) key * (float) n, w);
+                g.drawLine (x, 0.0f, x, h, n == 1 ? 2.5f : 1.2f);
+            }
+        }
+    }
+
+    // Étiquette du réglage mis en avant
+    if (focusAlpha > 0.05f && focusId.isNotEmpty())
+    {
+        const std::map<juce::String, std::pair<juce::String, juce::Colour>> names {
+            { "gen", { "GEN", palette::sky } }, { "tone", { "TONE", palette::lavender } },
+            { "drive", { "DRIVE", palette::peach } }, { "shape", { "SHAPE", palette::butter } },
+            { "pump", { "PUMP", palette::rose } }, { "width", { "WIDTH", palette::mint } },
+            { "crossover", { "CROSSOVER", palette::aqua } }, { "input", { "INPUT", palette::aqua } },
+            { "output", { "OUTPUT", palette::aqua } }, { "mix", { "MIX", palette::aqua } },
+            { "key", { "KEY", palette::butter } },
+        };
+        auto it = names.find (focusId);
+        if (it != names.end())
+        {
+            juce::String detail;
+            if (focusId == "tone")
+            {
+                const float f0 = (float) key * (val ("toneHarm") + 1.0f);
+                detail = params::noteNameForFrequency (f0) + "  " + juce::String (f0, 1) + " Hz";
+            }
+            else if (focusId == "gen")
+                detail = val ("genType") > 0.5f ? (on ("keyLock") ? "SINE on " + params::noteNameForFrequency ((float) key) : juce::String ("SINE tracking"))
+                                                 : "OCTAVE -12";
+            else if (focusId == "drive")
+                detail = juce::StringArray { "TAPE", "TUBE", "HARD", "FOLD" }[(int) val ("driveType")] + "  " + juce::String ((int) val ("drive")) + " %";
+            else if (focusId == "pump")
+                detail = juce::StringArray { "1/1", "1/2", "1/4", "1/8", "1/16" }[(int) val ("pumpRate")] + "  depth " + juce::String ((int) val ("pumpDepth")) + " %";
+            else if (focusId == "crossover") detail = juce::String ((int) fc) + " Hz";
+            else if (focusId == "key")       detail = params::noteNameForFrequency ((float) key) + "  " + juce::String (key, 1) + " Hz";
+            else if (focusId == "input")     detail = juce::String (val ("inGain"), 1) + " dB";
+            else if (focusId == "output")    detail = juce::String (val ("output"), 1) + " dB";
+            else if (focusId == "mix")       detail = juce::String ((int) val ("mix")) + " %";
+            else if (focusId == "shape")     detail = "ATT " + juce::String ((int) val ("attack")) + "  SUS " + juce::String ((int) val ("sustain"));
+            else if (focusId == "width")     detail = juce::String ((int) val ("width")) + " %";
+
+            const auto text = it->second.first + (detail.isNotEmpty() ? "   " + detail : juce::String());
+            const auto font = bold (12.0f);
+            const float tw = juce::GlyphArrangement::getStringWidth (font, text) + 20.0f;
+            auto pill = juce::Rectangle<float> (w - tw - 10.0f, 20.0f, tw, 20.0f);
+            g.setColour (it->second.second.withAlpha (focusAlpha));
+            g.fillRoundedRectangle (pill, 10.0f);
+            g.setColour (palette::ink.withAlpha (focusAlpha));
+            g.setFont (font);
+            g.drawText (text, pill.toNearestInt(), juce::Justification::centred);
+        }
+    }
 }
 
 // ============================================================================
@@ -837,9 +1142,34 @@ Panel::Panel (SubShaperProcessor& p)
                      &driveMix, &pumpDepth, &pumpShape, &width, &mix, &attack, &sustain })
         k->slider.updateText();
 
+    // Survol / réglage -> mise en avant sur l'écran
+    for (auto* c : std::initializer_list<juce::Component*> { &genOn, genTypeSeg.get(), &genLevel, &genTone, &keyLockBtn })
+        registerFocus (*c, "gen");
+    for (auto* c : std::initializer_list<juce::Component*> { &toneOn, &toneAmt, &toneQ, &toneHarm })
+        registerFocus (*c, "tone");
+    for (auto* c : std::initializer_list<juce::Component*> { &driveOn, driveTypeSeg.get(), &drive, &color, &focus, &driveMix })
+        registerFocus (*c, "drive");
+    for (auto* c : std::initializer_list<juce::Component*> { &shapeOn, &attack, &sustain })
+        registerFocus (*c, "shape");
+    for (auto* c : std::initializer_list<juce::Component*> { &pumpOn, pumpRateSeg.get(), &pumpDepth, &pumpShape })
+        registerFocus (*c, "pump");
+    for (auto* c : std::initializer_list<juce::Component*> { &widthOn, &width })
+        registerFocus (*c, "width");
+    registerFocus (crossover, "crossover");
+    registerFocus (inGain, "input");
+    registerFocus (output, "output");
+    registerFocus (mix, "mix");
+    registerFocus (keyKnob, "key");
+    registerFocus (*octaveSeg, "key");
+    spectrum.playedFrequency = [this] { return tuner.getFrequency(); };
+
+    for (auto* prm : proc.getParameters())
+        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (prm))
+            lastValues[rp->getParameterID()] = rp->getValue();
+
     refreshPresetBox();
     setSize (baseW, baseH);
-    startTimerHz (10);
+    startTimerHz (20);
     timerCallback();
 }
 
@@ -847,6 +1177,41 @@ Panel::~Panel()
 {
     stopTimer();
     setLookAndFeel (nullptr);
+}
+
+void Panel::registerFocus (juce::Component& c, const juce::String& id)
+{
+    focusRelay.ids[&c] = id;
+    c.addMouseListener (&focusRelay, true);
+}
+
+void Panel::FocusRelay::update (const juce::MouseEvent& e, bool hold)
+{
+    for (auto* c = e.eventComponent; c != nullptr && c != &panel; c = c->getParentComponent())
+    {
+        auto it = ids.find (c);
+        if (it != ids.end())
+        {
+            panel.spectrum.setFocus (it->second, hold);
+            return;
+        }
+    }
+}
+
+juce::String Panel::moduleForParam (const juce::String& id)
+{
+    if (id.startsWith ("gen") || id == "keyLock") return "gen";
+    if (id.startsWith ("tone")) return "tone";
+    if (id.startsWith ("drive") || id == "color" || id == "focus") return "drive";
+    if (id == "shapeOn" || id == "attack" || id == "sustain") return "shape";
+    if (id.startsWith ("pump")) return "pump";
+    if (id.startsWith ("width")) return "width";
+    if (id == "crossover") return "crossover";
+    if (id == "inGain") return "input";
+    if (id == "output") return "output";
+    if (id == "mix") return "mix";
+    if (id.startsWith ("key")) return "key";
+    return {};
 }
 
 void Panel::attachKnob (LabelledKnob& k, const juce::String& id, const juce::String& text, juce::Colour c, const juce::String& tip)
@@ -880,7 +1245,8 @@ void Panel::refreshPresetBox()
         if (category != list[i].category)
         {
             category = list[i].category;
-            presetBox.addSectionHeading (category);
+            if (category.isNotEmpty())
+                presetBox.addSectionHeading (category);
         }
         presetBox.addItem (list[i].name, (int) i + 1);
     }
@@ -929,6 +1295,23 @@ void Panel::savePresetDialog()
 
 void Panel::timerCallback()
 {
+    {
+        juce::String changedModule;
+        int changes = 0;
+        for (auto& [id, last] : lastValues)
+        {
+            const float now = proc.apvts.getParameter (id)->getValue();
+            if (std::abs (now - last) > 1.0e-4f)
+            {
+                last = now;
+                const auto m = moduleForParam (id);
+                if (m.isNotEmpty()) { changedModule = m; ++changes; }
+            }
+        }
+        if (changes >= 1 && changes <= 2)   // pas de flash lors d'un chargement de preset
+            spectrum.flash (changedModule);
+    }
+
     // Nom du preset
     const auto name = proc.getPresetName();
     if (name != lastPresetName)
@@ -1022,27 +1405,28 @@ void Panel::paint (juce::Graphics& g)
     drawRail (g, { 0.0f, 0.0f, (float) baseW, 20.0f });
     drawRail (g, { 0.0f, (float) baseH - 20.0f, (float) baseW, 20.0f });
 
-    // Titre pastel
-    const juce::String title ("SUBSHAPER");
-    const juce::Colour letters[] { palette::coral, palette::peach, palette::butter, palette::mint, palette::aqua,
-                                   palette::sky, palette::lavender, palette::rose, palette::coral };
-    const auto titleFont = bold (28.0f);
-    g.setFont (titleFont);
-    float tx = 24.0f;
-    for (int i = 0; i < title.length(); ++i)
+    // Titre : plaque claire, texte noir
+    auto plate = juce::Rectangle<float> (18.0f, 28.0f, 300.0f, 40.0f);
+    g.setColour (juce::Colour (0xffece8e1));
+    g.fillRoundedRectangle (plate, 6.0f);
+    g.setColour (juce::Colour (0xffbdb8b0));
+    g.drawRoundedRectangle (plate.reduced (0.5f), 6.0f, 1.0f);
+    for (float sx : { plate.getX() + 9.0f, plate.getRight() - 9.0f })
     {
-        const auto ch = title.substring (i, i + 1);
-        const float cw = juce::GlyphArrangement::getStringWidth (titleFont, ch);
-        g.setColour (letters[i]);
-        g.drawText (ch, juce::Rectangle<float> (tx, 28.0f, cw + 2.0f, 36.0f), juce::Justification::centredLeft, false);
-        tx += cw + 2.0f;
+        g.setColour (juce::Colour (0xffb3aea6));
+        g.fillEllipse (juce::Rectangle<float> (6.0f, 6.0f).withCentre ({ sx, plate.getCentreY() }));
     }
-    g.setColour (palette::textDim);
-    g.setFont (bold (10.5f));
-    g.drawText ("BASS PROCESSOR", juce::Rectangle<float> (tx + 12.0f, 32.0f, 130.0f, 14.0f), juce::Justification::centredLeft);
-    g.setFont (plain (10.5f));
-    g.drawText ("v" + juce::String (JucePlugin_VersionString), juce::Rectangle<float> (tx + 12.0f, 46.0f, 130.0f, 14.0f),
+    g.setColour (juce::Colours::black);
+    g.setFont (juce::Font (juce::FontOptions (27.0f, juce::Font::bold)).withExtraKerningFactor (0.06f));
+    g.drawText ("SUBSHAPER", juce::Rectangle<float> (plate.getX() + 20.0f, plate.getY(), 190.0f, plate.getHeight()),
                 juce::Justification::centredLeft);
+    g.setColour (juce::Colour (0xff4a4750));
+    g.setFont (bold (9.5f));
+    g.drawText ("BASS PROCESSOR", juce::Rectangle<float> (plate.getX() + 196.0f, plate.getY() + 7.0f, 96.0f, 13.0f),
+                juce::Justification::centredLeft);
+    g.setFont (plain (9.5f));
+    g.drawText ("v" + juce::String (JucePlugin_VersionString),
+                juce::Rectangle<float> (plate.getX() + 196.0f, plate.getY() + 20.0f, 96.0f, 13.0f), juce::Justification::centredLeft);
 
     // Cartes
     drawCard (g, { 884.0f, 84.0f, 276.0f, 222.0f }, palette::butter, "KEY");
@@ -1050,31 +1434,6 @@ void Panel::paint (juce::Graphics& g)
         drawCard (g, m.bounds.toFloat(), m.colour, {});
     drawCard (g, { 20.0f, 640.0f, 1140.0f, 104.0f }, palette::aqua, "MAIN");
 
-    // Câble décoratif
-    const juce::Point<float> jIn (1030.0f, 706.0f), jOut (1110.0f, 706.0f);
-    for (auto [pt, name] : { std::pair<juce::Point<float>, const char*> { jIn, "IN" }, { jOut, "OUT" } })
-    {
-        g.setColour (palette::textDim);
-        g.setFont (bold (10.0f));
-        g.drawText (name, juce::Rectangle<float> (40.0f, 12.0f).withCentre (pt.translated (0.0f, -24.0f)), juce::Justification::centred);
-        juce::Path nut;
-        nut.addPolygon (pt, 6, 14.0f, 0.0f);
-        g.setColour (juce::Colour (0xffcfccd4));
-        g.fillPath (nut);
-        g.setColour (palette::ink);
-        g.fillEllipse (juce::Rectangle<float> (11.0f, 11.0f).withCentre (pt));
-    }
-    juce::Path cable;
-    cable.startNewSubPath (jIn);
-    cable.cubicTo (jIn.translated (6.0f, 38.0f), jOut.translated (-6.0f, 38.0f), jOut);
-    g.setColour (juce::Colours::black.withAlpha (0.4f));
-    g.strokePath (cable, juce::PathStrokeType (7.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded),
-                  juce::AffineTransform::translation (0.0f, 3.0f));
-    g.setColour (palette::rose);
-    g.strokePath (cable, juce::PathStrokeType (6.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    g.setColour (juce::Colours::white.withAlpha (0.35f));
-    g.strokePath (cable, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded),
-                  juce::AffineTransform::translation (0.0f, -1.2f));
 }
 
 void Panel::resized()

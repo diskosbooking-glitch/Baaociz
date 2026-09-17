@@ -63,6 +63,7 @@ public:
     std::atomic<double> currentSampleRate { 44100.0 };
     std::atomic<float> meterL { 0.0f }, meterR { 0.0f };
     std::atomic<double> hostBpm { 120.0 };
+    std::atomic<float> pumpGainNow { 1.0f };
 
     float getKeyFrequency() const;
 

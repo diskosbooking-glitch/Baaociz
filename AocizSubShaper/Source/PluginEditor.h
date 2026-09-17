@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
+#include <map>
 #include "PluginProcessor.h"
 
 // ----------------------------------------------------------------------------
@@ -58,9 +59,19 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override { smoothed.fill (-100.0f); }
 
+    // Mise en avant d'un module sur l'écran (survol, réglage, automation)
+    void setFocus (const juce::String& id, bool hold);
+    void flash (const juce::String& id);
+    std::function<float()> playedFrequency;
+
 private:
     void timerCallback() override;
     float xForFreq (float hz, float w) const;
+    void drawOverlays (juce::Graphics&, float w, float h);
+
+    juce::String focusId;
+    float focusAlpha = 0.0f;
+    bool focusHold = false;
 
     SubShaperProcessor& proc;
     static constexpr int fftOrder = 12;
@@ -80,6 +91,7 @@ public:
     explicit TunerView (SubShaperProcessor&);
     ~TunerView() override { stopTimer(); }
     void paint (juce::Graphics&) override;
+    float getFrequency() const { return shownFreq; }
 
 private:
     void timerCallback() override;
@@ -152,6 +164,19 @@ public:
     std::function<void (float)> onScaleChange;
 
 private:
+    struct FocusRelay : public juce::MouseListener
+    {
+        explicit FocusRelay (Panel& p) : panel (p) {}
+        void mouseEnter (const juce::MouseEvent& e) override { update (e, true); }
+        void mouseExit (const juce::MouseEvent& e) override  { update (e, false); }
+        void mouseDown (const juce::MouseEvent& e) override  { update (e, true); }
+        void update (const juce::MouseEvent& e, bool hold);
+        Panel& panel;
+        std::map<juce::Component*, juce::String> ids;
+    };
+    void registerFocus (juce::Component&, const juce::String& id);
+    static juce::String moduleForParam (const juce::String& paramId);
+
     void timerCallback() override;
     void refreshPresetBox();
     void savePresetDialog();
@@ -197,6 +222,8 @@ private:
     juce::OwnedArray<ButtonAtt> buttonAtts;
 
     std::vector<ModuleUI> modules;
+    FocusRelay focusRelay { *this };
+    std::map<juce::String, float> lastValues;
     juce::String lastPresetName;
     int lastGenType = -1;
 

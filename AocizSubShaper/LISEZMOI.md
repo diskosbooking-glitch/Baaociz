@@ -1,8 +1,8 @@
-# Subshaper — v0.3.0
+# Subshaper — v0.3.1
 
 Plugin de traitement du grave (AU / VST3), look synthé modulaire pastel.
 
-![Aperçu](docs/apercu-atl-knock.png)
+![Aperçu](docs/apercu-tone.png)
 
 ## Architecture
 Le grave (sous la fréquence CROSSOVER) passe dans une chaîne de modules cumulables :
@@ -24,10 +24,19 @@ MAIN : Input, Crossover, Mix, Output, Mono Low, Solo Low, Sub Cut 25,
 Delta (écoute de la différence), Gain Match, HQ (x4 / x2).
 Barre du haut : presets, Save, comparaison A/B, Undo/Redo, taille de fenêtre.
 
-## Presets
-Trap : ATL Knock, Crushed 808, Drill Glide, R&B Clean Sub, Phone Speaker Rescue
-House : Deep House Sine, Tech House Roll, Bass House Growl, Garage Wobble Sub
-Utility : Init, Mono Fix, Sub Tighten
+## Visualisation
+Survoler ou tourner un réglage affiche son action sur le spectre, dans la couleur du module :
+GEN (courbe du sub), TONE (courbe de résonance), DRIVE (harmoniques générées + focus),
+SHAPE (enveloppe), PUMP (cycles de ducking + niveau en direct), WIDTH (flèches de largeur),
+CROSSOVER, INPUT, OUTPUT, MIX et KEY. Les automations et contrôleurs MIDI déclenchent aussi l'affichage.
+
+## Presets (26)
+Trap : ATL Knock, Crushed 808, Drill Glide, NY Drill Punch, Memphis Rumble, Rage Distorted, Plugg Soft 808, Phone Speaker Rescue
+Rap & R&B : Boom Bap Warm, R&B Clean Sub, West Coast Bounce
+House : Deep House Sine, Tech House Roll, Bass House Growl, Minimal Rubber, Garage Wobble Sub
+Techno : Techno Rumble, Melodic Techno Sub
+Afro & Latin : Afro House Round, Amapiano Log Drum, Dembow Punch
+Utility : Init, Mono Fix, Sub Tighten, Kick Space, Soft Glue
 Les presets ne changent jamais la note KEY.
 Presets utilisateur : ~/Library/Application Support/Subshaper/Presets
 
@@ -37,7 +46,7 @@ Presets utilisateur : ~/Library/Application Support/Subshaper/Presets
 3. **Actions** → coche verte → **Artifacts** → **Subshaper-Mac**.
 
 ## Installation (Terminal)
-    sudo installer -pkg ~/Downloads/Subshaper-0.3.0.pkg -target /
+    sudo installer -pkg ~/Downloads/Subshaper-0.3.1.pkg -target /
 
 Puis Ableton → Réglages → Plug-ins → Rescan ;
 FL Studio → Options → Manage plugins → Find more plugins.
