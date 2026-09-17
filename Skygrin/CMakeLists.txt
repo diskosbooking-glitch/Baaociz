@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 # ---- Numero de version du plugin : incrementer a chaque mise a jour ----
-project(Skygrin VERSION 0.1.0)
+project(Skygrin VERSION 0.3.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

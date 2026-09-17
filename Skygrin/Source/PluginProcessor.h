@@ -35,7 +35,6 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
-    // lu par l'interface pour animer le dessin
     std::atomic<float> uiIntensity { 0.0f };
 
 private:
@@ -46,20 +45,19 @@ private:
     double currentSr = 44100.0;
 
     juce::SmoothedValue<float> intensitySmoothed;
-
     float cur[NumMods] = { 0.0f };
 
     juce::dsp::StateVariableTPTFilter<float> hpFilter, lpFilter, noiseFilter;
-    juce::dsp::Phaser<float>                 phaser;
-    juce::dsp::Reverb                        reverb;
+    juce::dsp::Reverb reverb;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Lagrange3rd> delayLine { 192000 };
 
-    FreqShifter shifter[2];
-    Crusher     crusher[2];
+    BarberFilter barber;
+    Riser        riser;
+    FreqShifter  shifter[2];
     juce::Random noiseRng;
 
-    float delaySamples[2] = { 11025.0f, 11025.0f };
-    double shiftLfoPhase = 0.0;
+    float  smoothedDelaySamples = 12000.0f;
+    double gatePhase = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SkygrinAudioProcessor)
 };

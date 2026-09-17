@@ -4,13 +4,11 @@
 //==============================================================================
 namespace
 {
-    // plafond doux : ne touche pas le signal tant qu'il reste sous -1 dBFS
     inline float ceilingClip (float x) noexcept
     {
         const float a = std::abs (x);
-        if (a <= 0.9f) return x;
-        const float over = (a - 0.9f) / 0.1f;
-        const float shaped = 0.9f + 0.1f * std::tanh (over);
+        if (a <= 0.85f) return x;
+        const float shaped = 0.85f + 0.15f * std::tanh ((a - 0.85f) / 0.15f);
         return (x < 0.0f) ? -shaped : shaped;
     }
 }
@@ -67,7 +65,7 @@ void SkygrinAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 
     hpFilter.prepare (spec);
     hpFilter.setType (juce::dsp::StateVariableTPTFilterType::highpass);
-    hpFilter.setResonance (0.85f);
+    hpFilter.setResonance (0.8f);
     hpFilter.setCutoffFrequency (20.0f);
     hpFilter.reset();
 
@@ -79,17 +77,9 @@ void SkygrinAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
 
     noiseFilter.prepare (spec);
     noiseFilter.setType (juce::dsp::StateVariableTPTFilterType::bandpass);
-    noiseFilter.setResonance (1.0f);
+    noiseFilter.setResonance (2.0f);
     noiseFilter.setCutoffFrequency (400.0f);
     noiseFilter.reset();
-
-    phaser.prepare (spec);
-    phaser.reset();
-    phaser.setCentreFrequency (700.0f);
-    phaser.setRate (0.4f);
-    phaser.setDepth (0.6f);
-    phaser.setFeedback (0.0f);
-    phaser.setMix (0.0f);
 
     reverb.prepare (spec);
     reverb.reset();
@@ -97,12 +87,11 @@ void SkygrinAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     delayLine.prepare (spec);
     delayLine.reset();
 
+    barber.prepare (spec);
+    riser.prepare (sampleRate);
+
     for (int ch = 0; ch < 2; ++ch)
-    {
         shifter[ch].prepare (sampleRate);
-        shifter[ch].setPhaseOffset (ch == 0 ? 0.0 : 0.25);
-        crusher[ch].reset();
-    }
 
     intensitySmoothed.reset (sampleRate, 0.02);
     intensitySmoothed.setCurrentAndTargetValue (
@@ -111,12 +100,12 @@ void SkygrinAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     for (int i = 0; i < NumMods; ++i)
         cur[i] = 0.0f;
 
-    shiftLfoPhase = 0.0;
+    smoothedDelaySamples = (float) (sampleRate * 0.25);
+    gatePhase = 0.0;
 }
 
 //==============================================================================
-void SkygrinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
-                                          juce::MidiBuffer&)
+void SkygrinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
 
@@ -131,18 +120,14 @@ void SkygrinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     if (numCh <= 0 || numSamples <= 0)
         return;
 
-    // ---- tempo hote pour caler le delay sur une croche ----------------------
     double bpm = 128.0;
     if (auto* ph = getPlayHead())
         if (auto position = ph->getPosition())
             if (auto hostBpm = position->getBpm())
                 bpm = juce::jlimit (40.0, 220.0, *hostBpm);
 
-    const float eighth = (float) (currentSr * (60.0 / bpm) * 0.5);
-    delaySamples[0] = juce::jlimit (16.0f, 190000.0f, eighth);
-    delaySamples[1] = juce::jlimit (16.0f, 190000.0f, eighth + (float) (currentSr * 0.013));
+    const double beatSeconds = 60.0 / bpm;
 
-    // ---- parametres ---------------------------------------------------------
     const float target = apvts.getRawParameterValue ("intensity")->load() * 0.01f;
     intensitySmoothed.setTargetValue (target);
     uiIntensity.store (target);
@@ -152,8 +137,8 @@ void SkygrinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const PresetDef& P = kPresets[presetIdx];
 
     juce::Reverb::Parameters rp;
-    rp.width    = 1.0f;
-    rp.damping  = 0.35f;
+    rp.width      = 1.0f;
+    rp.damping    = 0.35f;
     rp.freezeMode = 0.0f;
 
     int pos = 0;
@@ -162,68 +147,88 @@ void SkygrinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         const int n = juce::jmin (kChunk, numSamples - pos);
         const float t = intensitySmoothed.skip (n);
 
-        // lissage des modules (evite les clics au changement de preset)
         const float coef = 1.0f - std::exp (- (float) n / (float) (currentSr * 0.02));
         for (int i = 0; i < NumMods; ++i)
             cur[i] += (modValue (P, i, t) - cur[i]) * coef;
 
-        // ---- mapping vers le DSP -------------------------------------------
         const float nyq = (float) (currentSr * 0.45);
 
+        // --- passe-haut resonant : c'est lui qui "chante" quand il monte -----
         hpFilter.setCutoffFrequency (juce::jlimit (20.0f, nyq,
-                                     20.0f * std::pow (80.0f, cur[ModHighpass])));
-        lpFilter.setCutoffFrequency (juce::jlimit (200.0f, nyq,
-                                     20000.0f * std::pow (0.019f, cur[ModLowpass])));
+                                     20.0f * std::pow (160.0f, cur[ModHighpass])));
+        hpFilter.setResonance (0.7f + cur[ModHighpass] * 2.8f);
 
-        const float driveGain = juce::Decibels::decibelsToGain (cur[ModDrive] * 28.0f);
-        const float driveComp = std::pow (driveGain, -0.62f);
-        const bool  useDrive  = cur[ModDrive] > 0.001f;
+        lpFilter.setCutoffFrequency (juce::jlimit (300.0f, nyq,
+                                     20000.0f * std::pow (0.025f, cur[ModLowpass])));
 
-        const bool  useCrush    = cur[ModCrush] > 0.002f;
-        const int   crushStep   = 1 + (int) (cur[ModCrush] * 22.0f);
-        const float crushLevels = std::pow (2.0f, 16.0f - cur[ModCrush] * 13.0f);
+        // --- les deux modules qui font monter, tous deux pilotes par t ------
+        barber.update (t);
+        riser.update (t);
 
-        const bool usePhaser = cur[ModPhaser] > 0.002f;
-        if (usePhaser)
-        {
-            phaser.setRate (0.15f + cur[ModPhaser] * 1.6f);
-            phaser.setDepth (0.35f + cur[ModPhaser] * 0.6f);
-            phaser.setFeedback (cur[ModPhaser] * 0.6f);
-            phaser.setMix (cur[ModPhaser] * 0.9f);
-        }
+        const float barberMix = cur[ModBarber];
+        const float riserGain = cur[ModRiser] * 0.35f;
 
-        shiftLfoPhase += (double) n * (0.07 / currentSr);
-        while (shiftLfoPhase >= 1.0) shiftLfoPhase -= 1.0;
-        const float lfo = (float) std::sin (juce::MathConstants<double>::twoPi * shiftLfoPhase);
-
-        const float shiftHz  = cur[ModShift] * (95.0f + 45.0f * lfo);
-        const float shiftWet = juce::jmin (1.0f, cur[ModShift] * 1.15f);
-        const bool  useShift = shiftWet > 0.002f;
-
-        const float delayMix = cur[ModDelay] * 0.65f;
-        const float feedback = cur[ModFeedback] * 0.72f;
-
-        const float noiseGain = cur[ModNoise] * 0.30f * (0.25f + 0.75f * t);
+        //  la bande de bruit suit la meme trajectoire que le riser
+        const float noiseGain = cur[ModNoise] * 0.16f;
         const bool  useNoise  = noiseGain > 0.0008f;
-        noiseFilter.setCutoffFrequency (juce::jlimit (60.0f, nyq,
-                                        180.0f * std::pow (45.0f, t)));
-        noiseFilter.setResonance (0.8f + 4.5f * t);
+        noiseFilter.setCutoffFrequency (juce::jlimit (80.0f, nyq,
+                                        (float) riser.getFundamental() * 2.0f));
+        noiseFilter.setResonance (1.5f + 6.0f * t);
+
+        const float driveGain = juce::Decibels::decibelsToGain (cur[ModDrive] * 22.0f);
+        const float driveComp = std::pow (driveGain, -0.55f);
+        const bool  useDrive  = cur[ModDrive] > 0.002f;
+
+        // --- delay qui raccourcit : 1/4 -> 1/8 -> 1/16 ----------------------
+        const double division = 1.0 + (double) t * 3.0;        // 1 .. 4
+        const float wantedDelay = (float) juce::jlimit (32.0, 190000.0,
+                                    currentSr * beatSeconds / division);
+        smoothedDelaySamples += (wantedDelay - smoothedDelaySamples) * 0.002f * (float) n;
+
+        const float delayMix = cur[ModDelay] * 0.55f;
+        const float feedback = cur[ModFeedback] * 0.70f;
+        const float shiftHz  = cur[ModShift] * 55.0f;
+        const float shiftWet = juce::jmin (1.0f, cur[ModShift] * 1.2f);
+
+        // --- gate synchro qui s'accelere ------------------------------------
+        const float gateDepth = cur[ModGate];
+        const double gateDiv = (t < 0.55) ? 2.0 : (t < 0.8 ? 4.0 : 8.0);
+        const double gateInc = (gateDiv / beatSeconds) / currentSr;
 
         const bool useReverb = cur[ModReverb] > 0.002f;
-        rp.wetLevel = cur[ModReverb] * 0.55f;
-        rp.dryLevel = 1.0f - cur[ModReverb] * 0.20f;
+        rp.wetLevel = cur[ModReverb] * 0.50f;
+        rp.dryLevel = 1.0f - cur[ModReverb] * 0.18f;
         rp.roomSize = 0.55f + cur[ModReverb] * 0.42f;
 
-        const float outGain = 1.0f / (1.0f + 0.30f * t);
+        // le niveau MONTE avec l'intensite, il ne baisse plus
+        const float outGain = 1.0f + 0.22f * t;
 
-        // ---- traitement echantillon par echantillon -------------------------
         for (int s = 0; s < n; ++s)
         {
             const int idx = pos + s;
 
+            const float riserSample = (riserGain > 0.0005f)
+                                        ? riser.process() * riserGain : 0.0f;
+
+            gatePhase += gateInc;
+            if (gatePhase >= 1.0) gatePhase -= 1.0;
+            const float gateWin = 0.5f + 0.5f * (float) std::cos (juce::MathConstants<double>::twoPi * gatePhase);
+            const float gate = 1.0f - gateDepth * (1.0f - gateWin * gateWin);
+
             for (int ch = 0; ch < numCh; ++ch)
             {
                 float x = buffer.getSample (ch, idx);
+
+                x = hpFilter.processSample (ch, x);
+                x = lpFilter.processSample (ch, x);
+
+                if (barberMix > 0.002f)
+                {
+                    const float b = barber.process (ch, x);
+                    x = x * (1.0f - barberMix) + b * barberMix;
+                }
+
+                x += riserSample;
 
                 if (useNoise)
                 {
@@ -232,41 +237,33 @@ void SkygrinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     x += nz * noiseGain;
                 }
 
+                // delay dont la boucle de feedback remonte a chaque passage
+                const float echo = delayLine.popSample (ch, smoothedDelaySamples, true);
+                const float fed  = (shiftWet > 0.002f)
+                                    ? shifter[ch].process (echo, shiftHz, shiftWet) : echo;
+                delayLine.pushSample (ch, x + fed * feedback);
+                x += echo * delayMix;
+
                 if (useDrive)
                     x = softClip (x * driveGain) * driveComp;
 
-                if (useCrush)
-                    x = crusher[ch].process (x, crushStep, crushLevels);
+                x *= gate * outGain;
 
-                x = hpFilter.processSample (ch, x);
-                x = lpFilter.processSample (ch, x);
-
-                if (useShift)
-                    x = shifter[ch].process (x, shiftHz, shiftWet);
-
-                const float echo = delayLine.popSample (ch, delaySamples[ch], true);
-                delayLine.pushSample (ch, x + echo * feedback);
-                x += echo * delayMix;
-
-                buffer.setSample (ch, idx, x * outGain);
+                buffer.setSample (ch, idx, x);
             }
         }
 
         hpFilter.snapToZero();
         lpFilter.snapToZero();
         noiseFilter.snapToZero();
-
-        // ---- modules par blocs ---------------------------------------------
-        auto block = juce::dsp::AudioBlock<float> (buffer)
-                        .getSubsetChannelBlock (0, (size_t) numCh)
-                        .getSubBlock ((size_t) pos, (size_t) n);
-        juce::dsp::ProcessContextReplacing<float> ctx (block);
-
-        if (usePhaser)
-            phaser.process (ctx);
+        barber.snapToZero();
 
         if (useReverb)
         {
+            auto block = juce::dsp::AudioBlock<float> (buffer)
+                            .getSubsetChannelBlock (0, (size_t) numCh)
+                            .getSubBlock ((size_t) pos, (size_t) n);
+            juce::dsp::ProcessContextReplacing<float> ctx (block);
             reverb.setParameters (rp);
             reverb.process (ctx);
         }
@@ -274,7 +271,6 @@ void SkygrinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         pos += n;
     }
 
-    // ---- plafond doux -------------------------------------------------------
     for (int ch = 0; ch < numCh; ++ch)
     {
         auto* d = buffer.getWritePointer (ch);
