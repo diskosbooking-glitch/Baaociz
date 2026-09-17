@@ -1,0 +1,24 @@
+name: Build Skygrin (macOS)
+
+on:
+  push:
+    paths:
+      - 'Skygrin/**'
+      - '.github/workflows/build-skygrin-mac.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build AU + VST3 + pkg
+        run: |
+          chmod +x Skygrin/ci/build_mac.sh
+          ./Skygrin/ci/build_mac.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Skygrin-Mac
+          path: Skygrin/build/out/*.pkg
