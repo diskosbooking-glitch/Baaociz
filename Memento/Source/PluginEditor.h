@@ -3,11 +3,14 @@
 #include "PluginProcessor.h"
 
 // ===========================================================================
-// Interface Memento v0.2 — refonte "carte par slot", chips de couleur par
-// rôle, export stems (par slot + global) et générateur de rolls par style.
+// Interface Memento v0.3 — carte par slot, export stems (par slot + global),
+// glisser-déposer d'un stem directement dans le DAW, générateur de rolls par
+// style, et accordage : PROJECT KEY + KEY SYNC (global) + tune par slot
+// (Auto / Original / Manual).
 // ===========================================================================
 
 class MementoAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                    public  juce::DragAndDropContainer,
                                     private juce::Timer
 {
 public:
@@ -18,8 +21,22 @@ public:
     void resized() override;
 
     // Actions déclenchées depuis les lignes / la barre d'outils.
-    void exportSlotStem (int slotIndex);
+    void exportSlotStem (int slotIndex);      // clic STEMS → dossier de destination
+    void startStemDrag  (int slotIndex);      // glisser STEMS → fichier temp → DAW
     void requestRemoveSlot (int slotIndex);
+
+    // Bouton STEMS : clic = export dossier, glisser = drag & drop vers le DAW.
+    struct StemControl : public juce::Component
+    {
+        void paint (juce::Graphics&) override;
+        void mouseDown (const juce::MouseEvent&) override;
+        void mouseDrag (const juce::MouseEvent&) override;
+        void mouseUp   (const juce::MouseEvent&) override;
+
+        MementoAudioProcessorEditor* owner = nullptr;
+        int  slotIndex = 0;
+        bool dragging  = false;
+    };
 
 private:
     void timerCallback() override;
@@ -31,6 +48,7 @@ private:
     void exportAllStems();
     void generateRoll();
     void addStyleLoop();
+    void buildProjectKeyBox();
     void setStatus (const juce::String& text, int ticks = 24);
     juce::String currentStyle() const;
 
@@ -51,9 +69,11 @@ private:
         juce::TextButton lockBtn   { "Lock" };
         juce::TextButton muteBtn   { "M" };
         juce::TextButton soloBtn   { "S" };
-        juce::TextButton stemsBtn  { "STEMS" };
+        StemControl      stems;
+        juce::ComboBox   tuneBox;
         juce::TextButton removeBtn { juce::String::fromUTF8 ("\xC3\x97") }; // ×
         juce::Slider  volSlider;
+        bool tuneBuilt = false;
     };
 
     MementoAudioProcessor& processor;
@@ -68,6 +88,11 @@ private:
     juce::TextButton genRollBtn   { "GENERATE ROLL" };
     juce::TextButton loopStyleBtn { "+ LOOP STYLE" };
     juce::ComboBox   styleCombo;
+
+    // Accordage global.
+    juce::Label      keyLabel;
+    juce::ComboBox   projectKeyBox;
+    juce::TextButton keySyncBtn { "KEY SYNC" };
 
     juce::Viewport viewport;
     juce::Component rowsHolder;

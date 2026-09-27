@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <algorithm>
+#include <numeric>
 
 using namespace juce;
 
@@ -56,6 +57,167 @@ static int snapBeats (double beats)
     return best;
 }
 
+// ===========================================================================
+// KeyParser — détection de tonalité depuis un nom de fichier
+//   • formats acceptés : Am, Amin, A min, A Minor, A-minor, F#m, Dbm, Gbmaj…
+//   • note seule : F#  → Root = F#, Mode = Unknown (on n'invente pas le mode)
+//   • Camelot    : 8A → A minor, 8B → C major (I/O seulement)
+//   • enharmonie : C# == Db (tout ramené en classes de hauteur 0..11)
+//   Aucune tonalité codée en dur : tout est calculé.
+// ===========================================================================
+
+// C=0, C#=1, D=2 … B=11
+int KeyParser::rootFromToken (const String& tokIn)
+{
+    auto tok = tokIn.trim();
+    if (tok.isEmpty()) return -1;
+
+    const juce::juce_wchar c = CharacterFunctions::toUpperCase (tok[0]);
+    int base;
+    switch (c) {
+        case 'C': base = 0;  break;
+        case 'D': base = 2;  break;
+        case 'E': base = 4;  break;
+        case 'F': base = 5;  break;
+        case 'G': base = 7;  break;
+        case 'A': base = 9;  break;
+        case 'B': base = 11; break;
+        default: return -1;
+    }
+    // accidents éventuels juste après la lettre
+    for (int i = 1; i < tok.length(); ++i)
+    {
+        const juce::juce_wchar a = tok[i];
+        if (a == '#' || a == 's' || a == 'S')      base += 1;
+        else if (a == 'b' || a == 'B' || a == 'f') base -= 1;   // 'b'/'f' = bémol
+        else break;
+    }
+    return ((base % 12) + 12) % 12;
+}
+
+// noms de note (dièses par défaut)
+String KeyParser::rootName (int root, bool preferFlat)
+{
+    if (root < 0) return "?";
+    static const char* sharp[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
+    static const char* flat[]  = { "C","Db","D","Eb","E","F","Gb","G","Ab","A","Bb","B" };
+    root = ((root % 12) + 12) % 12;
+    return preferFlat ? flat[root] : sharp[root];
+}
+
+String KeyParser::toString (const Key& k)
+{
+    if (! k.hasRoot()) return String::fromUTF8 ("\xE2\x80\x94"); // —
+    String r = rootName (k.root);
+    if (k.mode == Mode::Minor) return r + " Minor";
+    if (k.mode == Mode::Major) return r + " Major";
+    return r + " (root)";
+}
+
+// Camelot → (root, mode). Index 0 inutilisé ; 1..12.
+static Key camelotToKey (int number, bool sideB)
+{
+    // roues standard : A = mineur, B = majeur
+    static const int minorRoot[13] = { -1, 8,3,10,5,0,7,2,9,4,11,6,1 }; // 1A..12A
+    static const int majorRoot[13] = { -1, 11,6,1,8,3,10,5,0,7,2,9,4 }; // 1B..12B
+    Key k;
+    if (number < 1 || number > 12) return k;
+    if (sideB) { k.root = majorRoot[number]; k.mode = Mode::Major; }
+    else       { k.root = minorRoot[number]; k.mode = Mode::Minor; }
+    return k;
+}
+
+// un token est-il un mot de mode ? -1 = non, 0 = major, 1 = minor
+static int modeWord (const String& tokIn)
+{
+    auto t = tokIn.toLowerCase();
+    if (t == "min" || t == "minor" || t == "m" || t == "moll") return 1;
+    if (t == "maj" || t == "major" || t == "dur")              return 0;
+    return -1;
+}
+
+// essaie de parser un token "clé collée" : Am, Amin, AMinor, F#m, Dbmaj, Gbmin
+static Key keyFromGluedToken (const String& tok)
+{
+    Key k;
+    if (tok.isEmpty()) return k;
+    const juce::juce_wchar c = CharacterFunctions::toUpperCase (tok[0]);
+    if (! (c >= 'A' && c <= 'G')) return k;
+
+    // longueur de la racine (lettre + accidents)
+    int p = 1;
+    while (p < tok.length())
+    {
+        const juce::juce_wchar a = tok[p];
+        if (a == '#' || a == 's' || a == 'S' || a == 'b' || a == 'f') ++p;
+        else break;
+    }
+    // Attention : "b" peut être un bémol OU le début de "b..." — on borne aux accidents.
+    String rootTok = tok.substring (0, p);
+    String rest    = tok.substring (p);
+
+    int root = KeyParser::rootFromToken (rootTok);
+    if (root < 0) return k;
+
+    if (rest.isEmpty())
+    {
+        // note seule → Root connu, Mode inconnu (on n'invente pas)
+        k.root = root; k.mode = Mode::Unknown;
+        return k;
+    }
+    int mw = modeWord (rest);
+    if (mw == 1) { k.root = root; k.mode = Mode::Minor; return k; }
+    if (mw == 0) { k.root = root; k.mode = Mode::Major; return k; }
+
+    // reste non reconnu → pas une clé fiable (ex. "Bass")
+    return Key();
+}
+
+Key KeyParser::fromName (const String& name)
+{
+    // découpe en tokens sur les séparateurs usuels
+    StringArray toks;
+    toks.addTokens (name, " _-.()[]", "");
+    toks.removeEmptyStrings();
+
+    Key best;          // meilleure trouvaille
+    bool bestFull = false;
+
+    for (int i = 0; i < toks.size(); ++i)
+    {
+        const auto& t = toks[i];
+
+        // 1) Camelot : ^(1..12)(A|B)$
+        {
+            static const std::regex cam (R"(^([0-9]{1,2})([ABab])$)");
+            std::smatch mm; auto s = t.toStdString();
+            if (std::regex_match (s, mm, cam))
+            {
+                int num = std::atoi (mm[1].str().c_str());
+                bool sideB = (mm[2].str()[0] == 'B' || mm[2].str()[0] == 'b');
+                Key ck = camelotToKey (num, sideB);
+                if (ck.isFull()) return ck; // très haute confiance
+            }
+        }
+
+        // 2) clé collée : Am / A#min / Dbmaj / F#
+        Key g = keyFromGluedToken (t);
+        if (g.isFull()) return g;               // clé complète → on prend
+        if (g.hasRoot())
+        {
+            // note seule : peut être complétée par un mot de mode suivant
+            if (i + 1 < toks.size())
+            {
+                int mw = modeWord (toks[i + 1]);
+                if (mw == 1) { g.mode = Mode::Minor; return g; }
+                if (mw == 0) { g.mode = Mode::Major; return g; }
+            }
+            if (! bestFull && ! best.hasRoot()) best = g; // garde en repli (Root seul)
+        }
+    }
+    return best; // éventuellement Root seul, sinon vide
+}
+
 // ---------------------------------------------------------------------------
 
 MementoEngine::MementoEngine() : juce::Thread ("Memento Render")
@@ -97,6 +259,110 @@ int MementoEngine::getUsableCount() const
     return n;
 }
 
+String MementoEngine::getStatusText() const
+{
+    if (scanning.load()) return String::fromUTF8 ("Scanning library\xE2\x80\xA6");
+    const int total = getRecordCount();
+    if (total == 0) return String::fromUTF8 ("No library");
+    const int nw = lastNew.load();
+    String s = String::fromUTF8 ("Library ready \xE2\x80\x94 ") + String (total) + " samples";
+    if (nw > 0) s += " (" + String (nw) + " new)";
+    return s;
+}
+
+// --- tonalité globale ------------------------------------------------------
+void MementoEngine::setProjectKey (const Key& k)
+{
+    { const ScopedLock sl (keyLock); projectKey = k; }
+    recomputeAllTuning();
+}
+
+Key MementoEngine::getProjectKey() const
+{
+    const ScopedLock sl (keyLock);
+    return projectKey;
+}
+
+void MementoEngine::setKeySync (bool on)
+{
+    keySync.store (on);
+    recomputeAllTuning();
+}
+
+// --- accordage par slot ----------------------------------------------------
+void MementoEngine::setSlotTuneMode (int slotIndex, TuneMode m)
+{
+    if (auto* s = getSlot (slotIndex))
+    {
+        s->tuneMode.store ((int) m);
+        recomputeSlotTuning (slotIndex);
+        requestRender (slotIndex);
+    }
+}
+
+void MementoEngine::setSlotManualSemis (int slotIndex, int semitones)
+{
+    if (auto* s = getSlot (slotIndex))
+    {
+        s->tuneMode.store ((int) TuneMode::Manual);
+        s->semis.store (jlimit (-24, 24, semitones));
+        s->cents.store (0);
+        requestRender (slotIndex);
+    }
+}
+
+TuneMode MementoEngine::getSlotTuneMode (int slotIndex) const
+{
+    if (slotIndex >= 0 && slotIndex < (int) slots.size())
+        return (TuneMode) slots[(size_t) slotIndex]->tuneMode.load();
+    return TuneMode::Auto;
+}
+
+// transposition minimisée dans [-6..+6] demi-tons (mode ignoré : distance de racine)
+int MementoEngine::transposeSemitones (const Key& from, const Key& to)
+{
+    if (! from.hasRoot() || ! to.hasRoot()) return 0;
+    int d = ((to.root - from.root) % 12 + 12) % 12; // 0..11
+    if (d > 6) d -= 12;                              // -6..+6
+    return d;
+}
+
+void MementoEngine::recomputeSlotTuning (int slotIndex)
+{
+    Slot* s = getSlot (slotIndex);
+    if (s == nullptr) return;
+
+    const TuneMode m = (TuneMode) s->tuneMode.load();
+
+    if (m == TuneMode::Original || ! s->tonal.load())
+    {
+        s->semis.store (0);
+        s->cents.store (0);
+        return;
+    }
+    if (m == TuneMode::Manual)
+        return; // semis fixés par l'utilisateur
+
+    // Auto : suit la PROJECT KEY si KEY SYNC actif
+    int semi = 0;
+    if (keySync.load())
+    {
+        Key pk; { const ScopedLock sl (keyLock); pk = projectKey; }
+        if (pk.hasRoot() && s->sampleKey.hasRoot())
+            semi = transposeSemitones (s->sampleKey, pk);
+    }
+    s->semis.store (semi);
+    s->cents.store (0);
+}
+
+void MementoEngine::recomputeAllTuning()
+{
+    const int n = getNumSlots();
+    for (int i = 0; i < n; ++i) recomputeSlotTuning (i);
+    requestRenderAll();
+    MessageManager::callAsync ([this] { if (onSlotsChanged) onSlotsChanged(); });
+}
+
 // --- scan bibliothèque -----------------------------------------------------
 void MementoEngine::scanFolder (const File& folder)
 {
@@ -107,28 +373,102 @@ void MementoEngine::scanFolder (const File& folder)
     jobEvent.signal();
 }
 
+// index incrémental --------------------------------------------------------
+File MementoEngine::indexFile() const
+{
+    return libraryFolder.getChildFile (".memento_index.json");
+}
+
+void MementoEngine::loadIndex (std::map<String, Record>& out) const
+{
+    auto f = indexFile();
+    if (! f.existsAsFile()) return;
+    var root = JSON::parse (f);
+    if (auto* arr = root.getProperty ("items", var()).getArray())
+    {
+        for (auto& v : *arr)
+        {
+            Record r;
+            String path = v.getProperty ("path", "").toString();
+            if (path.isEmpty()) continue;
+            r.mtime  = (int64) (double) v.getProperty ("mtime", 0.0);
+            r.size   = (int64) (double) v.getProperty ("size", 0.0);
+            r.role   = (Role) (int) v.getProperty ("role", (int) Role::Tonal);
+            r.bpm    = (int) v.getProperty ("bpm", 0);
+            r.isLoop = (bool) v.getProperty ("loop", false);
+            r.key.root = (int) v.getProperty ("kroot", -1);
+            r.key.mode = (Mode) (int) v.getProperty ("kmode", (int) Mode::Unknown);
+            out[path] = r;
+        }
+    }
+}
+
+void MementoEngine::saveIndex (const std::vector<Record>& recs) const
+{
+    var root (new DynamicObject());
+    Array<var> arr;
+    for (auto& r : recs)
+    {
+        var o (new DynamicObject());
+        o.getDynamicObject()->setProperty ("path",  r.file.getFullPathName());
+        o.getDynamicObject()->setProperty ("mtime", (double) r.mtime);
+        o.getDynamicObject()->setProperty ("size",  (double) r.size);
+        o.getDynamicObject()->setProperty ("role",  (int) r.role);
+        o.getDynamicObject()->setProperty ("bpm",   r.bpm);
+        o.getDynamicObject()->setProperty ("loop",  r.isLoop);
+        o.getDynamicObject()->setProperty ("kroot", r.key.root);
+        o.getDynamicObject()->setProperty ("kmode", (int) r.key.mode);
+        arr.add (o);
+    }
+    root.getDynamicObject()->setProperty ("items", arr);
+    indexFile().replaceWithText (JSON::toString (root, false));
+}
+
 void MementoEngine::doScan (const File& folder)
 {
+    std::map<String, Record> index;
+    loadIndex (index);
+
     std::vector<Record> tmp;
+    int newCount = 0;
+
     for (const auto& f : RangedDirectoryIterator (folder, true, "*", File::findFiles))
     {
         if (threadShouldExit()) return;
         auto file = f.getFile();
         if (! isAudioFile (file)) continue;
-        auto nm = file.getFileNameWithoutExtension();
-        Record r;
-        r.file = file;
-        r.name = nm;
-        r.pack = file.getParentDirectory().getFileName();
-        r.bpm  = parseBpm (nm);
-        r.role = roleFromName (nm, r.pack);
-        r.isLoop = (r.bpm > 0) || nm.toLowerCase().contains ("loop");
-        tmp.push_back (std::move (r));
+
+        const String path  = file.getFullPathName();
+        const int64  mtime = file.getLastModificationTime().toMilliseconds();
+        const int64  size  = file.getSize();
+
+        auto it = index.find (path);
+        if (it != index.end() && it->second.mtime == mtime && it->second.size == size)
+        {
+            // inchangé → on réutilise l'analyse mise en cache
+            Record r = it->second;
+            r.file = file;
+            r.name = file.getFileNameWithoutExtension();
+            r.pack = file.getParentDirectory().getFileName();
+            tmp.push_back (std::move (r));
+        }
+        else
+        {
+            // nouveau ou modifié → (ré)analyse
+            Record r = recordFromFile (file);
+            r.mtime = mtime;
+            r.size  = size;
+            tmp.push_back (std::move (r));
+            ++newCount;
+        }
     }
+
+    lastNew.store (newCount);
     {
         const ScopedLock sl (dataLock);
         records = std::move (tmp);
     }
+    saveIndex (records);   // supprime implicitement les fichiers disparus
     scanning.store (false);
 
     // Les styles peuvent vivre dans un sous-dossier de la bibliothèque.
@@ -214,6 +554,7 @@ void MementoEngine::setDefaultSlots()
         auto s = std::make_unique<Slot>();
         s->role = r;
         s->source = SlotSource::Library;
+        s->tonal.store (roleIsTonal (r));
         slots.push_back (std::move (s));
     }
 }
@@ -226,6 +567,7 @@ void MementoEngine::addSlot (Role role)
         auto s = std::make_unique<Slot>();
         s->role = role;
         s->source = SlotSource::Library;
+        s->tonal.store (roleIsTonal (role));
         slots.push_back (std::move (s));
         idx = (int) slots.size() - 1;
     }
@@ -242,7 +584,7 @@ void MementoEngine::addStyleLoopSlot (const String& style)
         s->role = Role::Tonal;
         s->source = SlotSource::StyleLoop;
         s->styleName = style;
-        s->displayName = "Boucle · " + style;
+        s->displayName = "Boucle \xC2\xB7 " + style;
         slots.push_back (std::move (s));
         idx = (int) slots.size() - 1;
     }
@@ -259,7 +601,8 @@ void MementoEngine::addRollSlot (const String& style)
         s->role = Role::Roll;
         s->source = SlotSource::Roll;
         s->styleName = style;
-        s->displayName = "Roll · " + style;
+        s->tonal.store (false); // un roll rythmique n'est jamais pitché
+        s->displayName = "Roll \xC2\xB7 " + style;
         slots.push_back (std::move (s));
         idx = (int) slots.size() - 1;
     }
@@ -318,12 +661,15 @@ void MementoEngine::rerollSlot (int index)
         s->recordIndex = pick;
         {
             const ScopedLock sl (dataLock);
-            s->displayName = records[(size_t) pick].name;
-            s->displaySub  = records[(size_t) pick].pack + " · "
-                           + (records[(size_t) pick].bpm > 0 ? String (records[(size_t) pick].bpm) + " BPM" : String ("libre"));
+            const auto& rec = records[(size_t) pick];
+            s->displayName = rec.name;
+            s->sampleKey   = rec.key;
+            s->tonal.store (roleIsTonal (rec.role));
+            String sub = rec.pack + " \xC2\xB7 "
+                       + (rec.bpm > 0 ? String (rec.bpm) + " BPM" : String ("libre"));
+            if (rec.key.hasRoot()) sub += String::fromUTF8 (" \xC2\xB7 ") + KeyParser::toString (rec.key);
+            s->displaySub = sub;
         }
-        s->rendering.store (true);
-        requestRender (index);
     }
     else if (s->source == SlotSource::StyleLoop)
     {
@@ -331,9 +677,12 @@ void MementoEngine::rerollSlot (int index)
         if (files.isEmpty()) { s->displayName = "(style vide)"; if (onSlotsChanged) onSlotsChanged(); return; }
         s->fileSource  = files[rng.nextInt (files.size())];
         s->displayName = s->fileSource.getFileNameWithoutExtension();
-        s->displaySub  = s->styleName + " · boucle";
-        s->rendering.store (true);
-        requestRender (index);
+        Record rec = recordFromFile (s->fileSource);
+        s->sampleKey = rec.key;
+        s->tonal.store (roleIsTonal (rec.role));
+        String sub = s->styleName + " \xC2\xB7 boucle";
+        if (rec.key.hasRoot()) sub += String::fromUTF8 (" \xC2\xB7 ") + KeyParser::toString (rec.key);
+        s->displaySub = sub;
     }
     else // Roll
     {
@@ -341,12 +690,15 @@ void MementoEngine::rerollSlot (int index)
         if (files.isEmpty()) { s->displayName = "(style vide)"; if (onSlotsChanged) onSlotsChanged(); return; }
         s->fileSource  = files[rng.nextInt (files.size())];
         s->rollSeed    = rng.nextInt();
-        s->displayName = "Roll · " + s->styleName;
-        s->displaySub  = s->fileSource.getFileNameWithoutExtension() + " · variation";
-        s->rendering.store (true);
-        requestRender (index);
+        s->tonal.store (false);
+        s->sampleKey   = Key();
+        s->displayName = "Roll \xC2\xB7 " + s->styleName;
+        s->displaySub  = s->fileSource.getFileNameWithoutExtension() + " \xC2\xB7 variation";
     }
 
+    recomputeSlotTuning (index);
+    s->rendering.store (true);
+    requestRender (index);
     if (onSlotsChanged) onSlotsChanged();
 }
 
@@ -414,11 +766,14 @@ void MementoEngine::renderSlot (int slotIndex)
     int   recIndex = -1;
     File  fsrc;
     int   seed = 0;
+    bool  tonal = false;
+    int   semis = 0, cents = 0;
     {
         const ScopedLock sl (slotsLock);
         if (slotIndex < 0 || slotIndex >= (int) slots.size()) return;
         auto* s = slots[(size_t) slotIndex].get();
         src = s->source; recIndex = s->recordIndex; fsrc = s->fileSource; seed = s->rollSeed;
+        tonal = s->tonal.load(); semis = s->semis.load(); cents = s->cents.load();
     }
 
     std::shared_ptr<StretchedClip> clip;
@@ -439,6 +794,11 @@ void MementoEngine::renderSlot (int slotIndex)
         if (! fsrc.existsAsFile()) return;
         clip = makeRollClip (fsrc, seed);
     }
+
+    // Accordage : pitch-shift granulaire (préserve la durée → BPM inchangé),
+    // uniquement pour les slots tonals qui demandent un décalage.
+    if (clip != nullptr && tonal && (semis != 0 || cents != 0))
+        pitchShiftBuffer (clip->buffer, (double) semis + (double) cents / 100.0);
 
     // Stocke le clip si le slot pointe toujours la même source.
     {
@@ -469,6 +829,9 @@ Record MementoEngine::recordFromFile (const File& f)
     r.bpm  = parseBpm (r.name);
     r.role = roleFromName (r.name, r.pack);
     r.isLoop = (r.bpm > 0) || r.name.toLowerCase().contains ("loop");
+    r.key  = KeyParser::fromName (r.name);
+    r.mtime = f.getLastModificationTime().toMilliseconds();
+    r.size  = f.getSize();
     return r;
 }
 
@@ -490,8 +853,10 @@ std::shared_ptr<StretchedClip> MementoEngine::makeClip (const Record& rec)
     const double bpm        = hostBpm.load();
     const double tempoRatio = (srcBpm > 0.0) ? jlimit (0.25, 4.0, bpm / srcBpm) : 1.0;
 
-    // Calage au tempo par ré-échantillonnage (v0.1) : sortie i (SR hôte) ->
-    // position source = i * tempoRatio * fileSr / hostSr.
+    // Calage au tempo par ré-échantillonnage : sortie i (SR hôte) ->
+    // position source = i * tempoRatio * fileSr / hostSr.  (KEY et BPM restent
+    // découplés : ici on ne touche qu'au TEMPS ; la hauteur est gérée à part
+    // par pitchShiftBuffer après ce rendu.)
     const double step = tempoRatio * fileSr / sr;
     const int    srcN = src.getNumSamples();
     const int64  outFrames = (int64) std::floor ((double) (srcN - 1) / jmax (1.0e-6, step));
@@ -616,8 +981,9 @@ std::shared_ptr<StretchedClip> MementoEngine::makeRollClip (const File& src, int
         int64 len   = jmin ((int64) srcN, jmin (span, loopLen - start));
         if (len <= 0) continue;
 
-        // crescendo pour le feel build-up (droit = gain constant)
-        float hitGain = accel ? (0.45f + 0.55f * (float) h / (float) jmax ((size_t) 1, nh - 1)) : 0.9f;
+        // crescendo pour le feel build-up (droit = gain constant) + variation de vélocité
+        float velo = 0.85f + 0.15f * (r.nextFloat() - 0.5f) * 2.0f;   // ±15 % aléatoire
+        float hitGain = (accel ? (0.45f + 0.55f * (float) h / (float) jmax ((size_t) 1, nh - 1)) : 0.9f) * velo;
 
         int64 tail = jmin ((int64) 256, len);       // court fade pour éviter les clics
         for (int64 i = 0; i < len; ++i)
@@ -634,26 +1000,120 @@ std::shared_ptr<StretchedClip> MementoEngine::makeRollClip (const File& src, int
     return clip;
 }
 
-// --- export stems ----------------------------------------------------------
-bool MementoEngine::writeClipToWav (const StretchedClip& clip, const File& outFile) const
+// --- pitch-shift granulaire (overlap-add, préserve la durée) ---------------
+// ratio de hauteur = 2^(semitones/12). On lit, dans chaque grain, l'entrée à
+// une vitesse = ratio (change la hauteur), mais les grains sont placés à la
+// même position temporelle en entrée et en sortie (la durée est préservée).
+// Fenêtre de Hann + normalisation par la somme des fenêtres (bords propres).
+void MementoEngine::pitchShiftBuffer (AudioBuffer<float>& buf, double semitones)
 {
-    const int64 n = clip.loopLen > 0 ? clip.loopLen : (int64) clip.buffer.getNumSamples();
-    if (n <= 0) return false;
+    if (std::abs (semitones) < 1.0e-4) return;
+    const int N = buf.getNumSamples();
+    const int C = buf.getNumChannels();
+    if (N < 64 || C <= 0) return;
 
-    AudioBuffer<float> buf (2, (int) n);
+    const double ratio = std::pow (2.0, semitones / 12.0);
+    const int grain = jmin (2048, jmax (256, N / 4));
+    const int hop   = jmax (1, grain / 4);          // 75 % de recouvrement
+
+    // fenêtre de Hann
+    std::vector<float> win ((size_t) grain);
+    for (int j = 0; j < grain; ++j)
+        win[(size_t) j] = 0.5f - 0.5f * std::cos (2.0 * MathConstants<double>::pi * (double) j / (double) (grain - 1));
+
+    AudioBuffer<float> out (C, N);
+    out.clear();
+    std::vector<float> norm ((size_t) N, 0.0f);
+
+    for (int outStart = 0; outStart < N; outStart += hop)
+    {
+        const int inStart = outStart;               // base temporelle alignée
+        for (int j = 0; j < grain; ++j)
+        {
+            const int oi = outStart + j;
+            if (oi >= N) break;
+            const double readPos = (double) inStart + (double) j * ratio;
+            if (readPos < 0.0 || readPos >= (double) (N - 1)) continue;
+            const int   i0  = (int) readPos;
+            const int   i1  = i0 + 1;
+            const float fr  = (float) (readPos - (double) i0);
+            const float w   = win[(size_t) j];
+            for (int c = 0; c < C; ++c)
+            {
+                const float a = buf.getSample (c, i0);
+                const float b = buf.getSample (c, i1);
+                out.addSample (c, oi, (a + (b - a) * fr) * w);
+            }
+            norm[(size_t) oi] += w;
+        }
+    }
+
+    for (int i = 0; i < N; ++i)
+    {
+        const float g = norm[(size_t) i];
+        if (g > 1.0e-4f)
+            for (int c = 0; c < C; ++c)
+                buf.setSample (c, i, out.getSample (c, i) / g);
+        else
+            for (int c = 0; c < C; ++c)
+                buf.setSample (c, i, 0.0f);
+    }
+}
+
+// --- export stems : longueur commune calée sur les mesures -----------------
+static long long gcdLL (long long a, long long b) { while (b != 0) { long long t = a % b; a = b; b = t; } return a < 0 ? -a : a; }
+static long long lcmLL (long long a, long long b) { if (a == 0 || b == 0) return 1; long long g = gcdLL (a, b); return (a / g) * b; }
+
+int64 MementoEngine::commonExportLen() const
+{
+    const double bpm = hostBpm.load();
+    const double barSamples = 4.0 * (60.0 / bpm) * sr;   // 1 mesure 4/4
+    if (barSamples < 1.0) return 0;
+
+    long long lcmBars = 1;
+    {
+        const ScopedLock sl (slotsLock);
+        for (auto& sp : slots)
+        {
+            auto clip = std::atomic_load (&sp->clip);
+            if (clip == nullptr || clip->loopLen <= 0) continue;
+            long long bars = (long long) jmax ((int64) 1,
+                                (int64) std::llround ((double) clip->loopLen / barSamples));
+            bars = jlimit ((long long) 1, (long long) 16, bars);
+            lcmBars = lcmLL (lcmBars, bars);
+            lcmBars = jmin (lcmBars, (long long) 16);     // borne de sécurité
+        }
+    }
+    return (int64) std::llround ((double) lcmBars * barSamples);
+}
+
+// écrit un clip bouclé pour remplir exactement totalLen (même départ/durée
+// pour tous les stems), en WAV 32-bit float au SR hôte.
+bool MementoEngine::writeClipAligned (const StretchedClip& clip, int64 totalLen, const File& outFile) const
+{
+    if (totalLen <= 0) totalLen = clip.loopLen > 0 ? clip.loopLen : (int64) clip.buffer.getNumSamples();
+    if (totalLen <= 0) return false;
+
+    const int64 loopLen = clip.loopLen > 0 ? clip.loopLen : (int64) clip.buffer.getNumSamples();
+    const int   clipN   = clip.buffer.getNumSamples();
+    const int   clipCh  = clip.buffer.getNumChannels();
+    if (loopLen <= 0 || clipN <= 0) return false;
+
+    AudioBuffer<float> buf (2, (int) totalLen);
     buf.clear();
-    const int avail  = clip.buffer.getNumSamples();
-    const int copyN  = (int) jmin ((int64) avail, n);
-    const int clipCh = clip.buffer.getNumChannels();
-    for (int c = 0; c < 2; ++c)
-        buf.copyFrom (c, 0, clip.buffer, jmin (c, clipCh - 1), 0, copyN);
+    for (int64 i = 0; i < totalLen; ++i)
+    {
+        const int64 src = i % loopLen;              // pavage (tiling) sur la boucle
+        if (src >= clipN) continue;
+        for (int c = 0; c < 2; ++c)
+            buf.setSample (c, (int) i, clip.buffer.getSample (jmin (c, clipCh - 1), (int) src));
+    }
 
     outFile.deleteFile();
     std::unique_ptr<FileOutputStream> fos (outFile.createOutputStream());
     if (fos == nullptr) return false;
 
-    WavAudioFormat wav;
-    // 32 bits → WAVE_FORMAT_IEEE_FLOAT (aucune perte de dynamique).
+    WavAudioFormat wav;   // 32 bits → WAVE_FORMAT_IEEE_FLOAT (aucune perte)
     std::unique_ptr<AudioFormatWriter> writer (wav.createWriterFor (fos.get(), sr, 2, 32, {}, 0));
     if (writer == nullptr) return false;
     fos.release(); // le writer prend possession du flux
@@ -661,39 +1121,85 @@ bool MementoEngine::writeClipToWav (const StretchedClip& clip, const File& outFi
     return writer->writeFromAudioSampleBuffer (buf, 0, buf.getNumSamples());
 }
 
+String MementoEngine::stemFileName (int slotIndex) const
+{
+    Role role = Role::Drums;
+    String nm;
+    {
+        const ScopedLock sl (slotsLock);
+        if (slotIndex < 0 || slotIndex >= (int) slots.size()) return "Stem.wav";
+        auto* s = slots[(size_t) slotIndex].get();
+        role = s->role;
+        nm   = s->displayName;
+    }
+    String base = String (slotIndex + 1).paddedLeft ('0', 2) + "_" + String (roleLabel (role));
+    nm = nm.replace (String::fromUTF8 ("\xC2\xB7"), "-"); // retire le point médian
+    nm = File::createLegalFileName (nm).trim();
+    if (nm.isNotEmpty() && nm != "-" && nm != "?")
+    {
+        base += "_";
+        base += nm.substring (0, 28);
+    }
+    return base + ".wav";
+}
+
 bool MementoEngine::exportStem (int slotIndex, const File& destDir)
 {
     if (! destDir.isDirectory()) destDir.createDirectory();
 
     std::shared_ptr<StretchedClip> clip;
-    Role role = Role::Drums;
-    String nm;
     {
         const ScopedLock sl (slotsLock);
         auto* s = getSlot (slotIndex);
         if (s == nullptr) return false;
         clip = std::atomic_load (&s->clip);
-        role = s->role;
-        nm   = s->displayName;
     }
     if (clip == nullptr || clip->buffer.getNumSamples() <= 0) return false;
 
-    const int bpm = (int) std::llround (hostBpm.load());
-    String base = "Memento_" + String (slotIndex + 1).paddedLeft ('0', 2)
-                + "_" + String (roleLabel (role))
-                + "_" + File::createLegalFileName (nm)
-                + "_" + String (bpm) + "bpm";
-    return writeClipToWav (*clip, destDir.getChildFile (base + ".wav"));
+    const int64 totalLen = commonExportLen();
+    return writeClipAligned (*clip, totalLen, destDir.getChildFile (stemFileName (slotIndex)));
 }
 
 int MementoEngine::exportAllStems (const File& destDir)
 {
     if (! destDir.isDirectory()) destDir.createDirectory();
+    const int64 totalLen = commonExportLen();   // longueur commune calculée une fois
     int count = 0;
     const int n = getNumSlots();
     for (int i = 0; i < n; ++i)
-        if (exportStem (i, destDir)) ++count;
+    {
+        std::shared_ptr<StretchedClip> clip;
+        {
+            const ScopedLock sl (slotsLock);
+            auto* s = getSlot (i);
+            if (s == nullptr) continue;
+            clip = std::atomic_load (&s->clip);
+        }
+        if (clip == nullptr || clip->buffer.getNumSamples() <= 0) continue;
+        if (writeClipAligned (*clip, totalLen, destDir.getChildFile (stemFileName (i)))) ++count;
+    }
     return count;
+}
+
+// écrit un stem dans un fichier temporaire (pour le drag & drop vers le DAW)
+File MementoEngine::writeStemToTemp (int slotIndex)
+{
+    std::shared_ptr<StretchedClip> clip;
+    {
+        const ScopedLock sl (slotsLock);
+        auto* s = getSlot (slotIndex);
+        if (s == nullptr) return File();
+        clip = std::atomic_load (&s->clip);
+    }
+    if (clip == nullptr || clip->buffer.getNumSamples() <= 0) return File();
+
+    File dir = File::getSpecialLocation (File::tempDirectory).getChildFile ("MementoStems");
+    dir.createDirectory();
+    File out = dir.getChildFile (stemFileName (slotIndex));
+
+    const int64 totalLen = commonExportLen();
+    if (! writeClipAligned (*clip, totalLen, out)) return File();
+    return out;
 }
 
 // --- lecture (thread audio) ------------------------------------------------
@@ -748,6 +1254,14 @@ String MementoEngine::saveStateString() const
     var root (new DynamicObject());
     root.getDynamicObject()->setProperty ("folder", libraryFolder.getFullPathName());
     root.getDynamicObject()->setProperty ("styles", stylesFolder.getFullPathName());
+
+    { // tonalité globale
+        const ScopedLock sl (keyLock);
+        root.getDynamicObject()->setProperty ("pkRoot", projectKey.root);
+        root.getDynamicObject()->setProperty ("pkMode", (int) projectKey.mode);
+    }
+    root.getDynamicObject()->setProperty ("keySync", keySync.load());
+
     Array<var> arr;
     {
         const ScopedLock sl (slotsLock);
@@ -764,6 +1278,8 @@ String MementoEngine::saveStateString() const
             o.getDynamicObject()->setProperty ("mute",  sp->mute.load());
             o.getDynamicObject()->setProperty ("solo",  sp->solo.load());
             o.getDynamicObject()->setProperty ("lock",  sp->locked.load());
+            o.getDynamicObject()->setProperty ("tune",  sp->tuneMode.load());
+            o.getDynamicObject()->setProperty ("semis", sp->semis.load());
             arr.add (o);
         }
     }
@@ -777,6 +1293,15 @@ void MementoEngine::loadStateString (const String& s)
     if (! root.isObject()) return;
     auto folder = File (root.getProperty ("folder", "").toString());
     auto styles = File (root.getProperty ("styles", "").toString());
+
+    { // tonalité globale
+        Key pk;
+        pk.root = (int) root.getProperty ("pkRoot", -1);
+        pk.mode = (Mode) (int) root.getProperty ("pkMode", (int) Mode::Unknown);
+        const ScopedLock sl (keyLock);
+        projectKey = pk;
+    }
+    keySync.store ((bool) root.getProperty ("keySync", false));
 
     if (auto* arr = root.getProperty ("slots", var()).getArray())
     {
@@ -795,11 +1320,14 @@ void MementoEngine::loadStateString (const String& s)
             sp->mute.store   ((bool) v.getProperty ("mute", false));
             sp->solo.store   ((bool) v.getProperty ("solo", false));
             sp->locked.store ((bool) v.getProperty ("lock", false));
+            sp->tuneMode.store ((int) v.getProperty ("tune", (int) TuneMode::Auto));
+            sp->semis.store  ((int) v.getProperty ("semis", 0));
+            sp->tonal.store  (roleIsTonal (sp->role));
             slots.push_back (std::move (sp));
         }
     }
     if (styles.isDirectory()) setStylesFolder (styles);
-    if (folder.isDirectory()) scanFolder (folder); // relance scan + première combinaison
+    if (folder.isDirectory()) scanFolder (folder); // relance scan (rescan auto à l'ouverture) + première combinaison
 }
 
 } // namespace mem

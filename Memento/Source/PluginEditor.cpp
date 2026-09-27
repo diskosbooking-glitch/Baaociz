@@ -11,6 +11,7 @@ static const Colour kPink  = Colour (0xfff45d9a);
 static const Colour kBlue  = Colour (0xff3b82d6);
 static const Colour kRed   = Colour (0xffe0453b);
 static const Colour kTeal  = Colour (0xff2bb3c0);
+static const Colour kGold  = Colour (0xfff2b13a);
 static const Colour kCard  = Colour (0xfffffdf8);
 
 static Colour roleColour (mem::Role r)
@@ -27,6 +28,45 @@ static Colour roleColour (mem::Role r)
         case mem::Role::Roll:    return Colour (0xffe0453b);
         default:                 return Colour (0xff8a7a63);
     }
+}
+
+// ===========================================================================
+// StemControl — clic = export dossier, glisser = drag & drop vers le DAW
+// ===========================================================================
+void MementoAudioProcessorEditor::StemControl::paint (Graphics& g)
+{
+    auto b = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (kInk);
+    g.fillRoundedRectangle (b, 6.0f);
+
+    auto top = b.removeFromTop (b.getHeight() * 0.60f);
+    g.setColour (kPaper);
+    g.setFont (Font (11.0f, Font::bold));
+    g.drawText ("STEMS", top, Justification::centred);
+
+    g.setColour (kMint);
+    g.setFont (Font (9.0f));
+    g.drawText (String::fromUTF8 ("glisser \xE2\x86\x92 DAW"), b, Justification::centred);
+}
+
+void MementoAudioProcessorEditor::StemControl::mouseDown (const MouseEvent&)
+{
+    dragging = false;
+}
+
+void MementoAudioProcessorEditor::StemControl::mouseDrag (const MouseEvent& e)
+{
+    if (! dragging && e.getDistanceFromDragStart() > 6)
+    {
+        dragging = true;
+        if (owner != nullptr) owner->startStemDrag (slotIndex);
+    }
+}
+
+void MementoAudioProcessorEditor::StemControl::mouseUp (const MouseEvent&)
+{
+    if (! dragging && owner != nullptr) owner->exportSlotStem (slotIndex);
+    dragging = false;
 }
 
 // ===========================================================================
@@ -62,10 +102,30 @@ MementoAudioProcessorEditor::SlotRow::SlotRow (MementoAudioProcessor& p,
     muteBtn.setColour (TextButton::buttonOnColourId, kPink);
     soloBtn.setColour (TextButton::buttonOnColourId, kBlue);
 
-    stemsBtn.setColour (TextButton::buttonColourId, kInk);
-    stemsBtn.setColour (TextButton::textColourOffId, kPaper);
-    stemsBtn.onClick = [this] { owner.exportSlotStem (slotIndex); };
-    addAndMakeVisible (stemsBtn);
+    // bouton STEMS (clic + drag)
+    stems.owner = &owner;
+    stems.slotIndex = slotIndex;
+    addAndMakeVisible (stems);
+
+    // combo d'accordage par slot
+    tuneBox.addItem ("Auto", 1);
+    tuneBox.addItem ("Original", 2);
+    for (int s = -12; s <= 12; ++s)
+    {
+        String lab = (s > 0 ? "+" : "") + String (s) + " st";
+        tuneBox.addItem (lab, 112 + s);   // id = 112 + semitones (100..124)
+    }
+    tuneBox.setColour (ComboBox::backgroundColourId, kPaper);
+    tuneBox.setTextWhenNothingSelected ("Tune");
+    tuneBox.onChange = [this]
+    {
+        const int id = tuneBox.getSelectedId();
+        auto& e = proc.getEngine();
+        if      (id == 1) e.setSlotTuneMode  (slotIndex, mem::TuneMode::Auto);
+        else if (id == 2) e.setSlotTuneMode  (slotIndex, mem::TuneMode::Original);
+        else if (id >= 100) e.setSlotManualSemis (slotIndex, id - 112);
+    };
+    addAndMakeVisible (tuneBox);
 
     removeBtn.setColour (TextButton::buttonColourId, Colour (0x22000000));
     removeBtn.setColour (TextButton::textColourOffId, kInk);
@@ -100,15 +160,17 @@ void MementoAudioProcessorEditor::SlotRow::resized()
     roleLabel.setBounds (chipR);
     r.removeFromLeft (8);
 
-    auto right = r.removeFromRight (250);
+    auto right = r.removeFromRight (272);
     auto rTop = right.removeFromTop (right.getHeight() / 2).reduced (2, 5);
     auto rBot = right.reduced (2, 5);
     rerollBtn.setBounds (rTop.removeFromLeft (84)); rTop.removeFromLeft (5);
-    lockBtn.setBounds   (rTop.removeFromLeft (58)); rTop.removeFromLeft (5);
-    soloBtn.setBounds   (rTop.removeFromLeft (28)); rTop.removeFromLeft (5);
-    muteBtn.setBounds   (rTop.removeFromLeft (28));
-    stemsBtn.setBounds  (rBot.removeFromLeft (84)); rBot.removeFromLeft (5);
-    removeBtn.setBounds (rBot.removeFromRight (30));
+    lockBtn.setBounds   (rTop.removeFromLeft (56)); rTop.removeFromLeft (5);
+    soloBtn.setBounds   (rTop.removeFromLeft (26)); rTop.removeFromLeft (4);
+    muteBtn.setBounds   (rTop.removeFromLeft (26));
+
+    stems.setBounds     (rBot.removeFromLeft (78)); rBot.removeFromLeft (6);
+    removeBtn.setBounds  (rBot.removeFromRight (28)); rBot.removeFromRight (6);
+    tuneBox.setBounds    (rBot);
 
     r.removeFromRight (8);
     nameLabel.setBounds (r.removeFromTop (22));
@@ -125,12 +187,30 @@ void MementoAudioProcessorEditor::SlotRow::refresh()
     roleLabel.setText (mem::roleLabel (s->role), dontSendNotification);
     auto nm = s->displayName + (s->rendering.load() ? juce::String::fromUTF8 ("  (rendu\xE2\x80\xA6)") : String());
     nameLabel.setText (nm, dontSendNotification);
-    subLabel.setText (s->displaySub, dontSendNotification);
+
+    // sous-titre : pack · BPM · SAMPLE KEY  (+ transpose appliqué)
+    String sub = s->displaySub;
+    const int semis = s->semis.load();
+    if (s->tonal.load() && semis != 0)
+        sub += juce::String::fromUTF8 (" \xC2\xB7 ") + (semis > 0 ? "+" : "") + String (semis) + "st";
+    subLabel.setText (sub, dontSendNotification);
+
     lockBtn.setToggleState (s->locked.load(), dontSendNotification);
     muteBtn.setToggleState (s->mute.load(),   dontSendNotification);
     soloBtn.setToggleState (s->solo.load(),   dontSendNotification);
     if (! volSlider.isMouseButtonDown())
         volSlider.setValue (s->gain.load(), dontSendNotification);
+
+    // accordage : reflète l'état moteur, désactivé si non-tonal
+    const bool tonal = s->tonal.load();
+    tuneBox.setEnabled (tonal);
+    const auto m = proc.getEngine().getSlotTuneMode (slotIndex);
+    int id = 1;
+    if      (m == mem::TuneMode::Original) id = 2;
+    else if (m == mem::TuneMode::Manual)   id = 112 + jlimit (-12, 12, semis);
+    else                                    id = 1; // Auto
+    if (tuneBox.getSelectedId() != id)
+        tuneBox.setSelectedId (id, dontSendNotification);
 }
 
 // ===========================================================================
@@ -161,7 +241,7 @@ MementoAudioProcessorEditor::MementoAudioProcessorEditor (MementoAudioProcessor&
     titleLabel.setColour (Label::textColourId, kInk);
     addAndMakeVisible (titleLabel);
 
-    subtitleLabel.setText (juce::String::fromUTF8 ("song starter \xC2\xB7 AU"), dontSendNotification);
+    subtitleLabel.setText (juce::String::fromUTF8 ("song starter \xC2\xB7 AU \xC2\xB7 v0.3"), dontSendNotification);
     subtitleLabel.setFont (Font (12.5f));
     subtitleLabel.setColour (Label::textColourId, kSub);
     subtitleLabel.setJustificationType (Justification::centredLeft);
@@ -207,11 +287,46 @@ MementoAudioProcessorEditor::MementoAudioProcessorEditor (MementoAudioProcessor&
     styleCombo.setTextWhenNothingSelected (juce::String::fromUTF8 ("(aucun style)"));
     addAndMakeVisible (styleCombo);
 
+    // --- accordage global ---
+    keyLabel.setText ("PROJECT KEY", dontSendNotification);
+    keyLabel.setColour (Label::textColourId, kInk);
+    keyLabel.setFont (Font (12.0f, Font::bold));
+    keyLabel.setJustificationType (Justification::centredLeft);
+    addAndMakeVisible (keyLabel);
+
+    buildProjectKeyBox();
+    projectKeyBox.onChange = [this]
+    {
+        const int id = projectKeyBox.getSelectedId();
+        mem::Key k;
+        if (id >= 100)
+        {
+            k.root = (id - 100) / 2;
+            k.mode = ((id - 100) % 2 == 0) ? mem::Mode::Major : mem::Mode::Minor;
+        }
+        processor.getEngine().setProjectKey (k);
+        setStatus (juce::String::fromUTF8 ("Tonalit\xC3\xA9 projet : ")
+                   + (k.hasRoot() ? mem::KeyParser::toString (k) : juce::String::fromUTF8 ("\xE2\x80\x94")));
+    };
+    addAndMakeVisible (projectKeyBox);
+
+    keySyncBtn.setClickingTogglesState (true);
+    keySyncBtn.setColour (TextButton::buttonColourId, Colour (0xff2a2018));
+    keySyncBtn.setColour (TextButton::buttonOnColourId, kMint);
+    keySyncBtn.setColour (TextButton::textColourOnId, kInk);
+    keySyncBtn.onClick = [this]
+    {
+        processor.getEngine().setKeySync (keySyncBtn.getToggleState());
+        setStatus (keySyncBtn.getToggleState() ? juce::String::fromUTF8 ("KEY SYNC activ\xC3\xA9")
+                                                : juce::String::fromUTF8 ("KEY SYNC d\xC3\xA9sactiv\xC3\xA9"));
+    };
+    addAndMakeVisible (keySyncBtn);
+
     viewport.setViewedComponent (&rowsHolder, false);
     viewport.setScrollBarsShown (true, false);
     addAndMakeVisible (viewport);
 
-    setSize (660, 600);
+    setSize (720, 624);
     rebuildRows();
     refreshStyles();
     startTimerHz (8);
@@ -221,6 +336,18 @@ MementoAudioProcessorEditor::~MementoAudioProcessorEditor()
 {
     stopTimer();
     setLookAndFeel (nullptr);
+}
+
+void MementoAudioProcessorEditor::buildProjectKeyBox()
+{
+    projectKeyBox.clear (dontSendNotification);
+    projectKeyBox.addItem (juce::String::fromUTF8 ("\xE2\x80\x94 (aucune)"), 1);
+    for (int r = 0; r < 12; ++r)
+    {
+        projectKeyBox.addItem (mem::KeyParser::rootName (r) + " Major", 100 + r * 2);
+        projectKeyBox.addItem (mem::KeyParser::rootName (r) + " Minor", 101 + r * 2);
+    }
+    projectKeyBox.setSelectedId (1, dontSendNotification);
 }
 
 void MementoAudioProcessorEditor::paint (Graphics& g)
@@ -253,13 +380,20 @@ void MementoAudioProcessorEditor::resized()
     genRollBtn.setBounds (rowB.removeFromLeft (150)); rowB.removeFromLeft (8);
     loopStyleBtn.setBounds (rowB.removeFromLeft (140));
 
+    auto rowC = r.removeFromTop (34).reduced (16, 3);
+    keyLabel.setBounds (rowC.removeFromLeft (96)); rowC.removeFromLeft (4);
+    projectKeyBox.setBounds (rowC.removeFromLeft (150)); rowC.removeFromLeft (10);
+    keySyncBtn.setBounds (rowC.removeFromLeft (120));
+
     auto info = r.removeFromTop (24).reduced (16, 2);
-    statusLabel.setBounds (info.removeFromRight (230));
+    statusLabel.setBounds (info.removeFromRight (240));
     counterLabel.setBounds (info.removeFromLeft (180));
     folderLabel.setBounds (info);
 
     viewport.setBounds (r.reduced (8, 4));
     rowsHolder.setSize (viewport.getWidth() - 8, jmax (10, rows.size() * 80));
+    int y = 0;
+    for (auto* row : rows) { row->setBounds (0, y, rowsHolder.getWidth(), 78); y += 80; }
 }
 
 void MementoAudioProcessorEditor::rebuildRows()
@@ -290,6 +424,14 @@ void MementoAudioProcessorEditor::refreshRows()
     folderLabel.setText (e.isScanning() ? juce::String::fromUTF8 ("Indexation\xE2\x80\xA6")
                                         : (f.isDirectory() ? f.getFileName() : String ("Aucun dossier")),
                          dontSendNotification);
+
+    // reflète l'état d'accordage global
+    auto pk = e.getProjectKey();
+    int pid = 1;
+    if (pk.hasRoot()) pid = 100 + pk.root * 2 + (pk.mode == mem::Mode::Minor ? 1 : 0);
+    if (projectKeyBox.getSelectedId() != pid)
+        projectKeyBox.setSelectedId (pid, dontSendNotification);
+    keySyncBtn.setToggleState (e.getKeySync(), dontSendNotification);
 }
 
 void MementoAudioProcessorEditor::refreshStyles()
@@ -324,8 +466,13 @@ void MementoAudioProcessorEditor::timerCallback()
     refreshRows();
     refreshStyles();
 
+    // statut de scan (Scanning… / Library ready — N samples)
+    auto& e = processor.getEngine();
+    if (statusCountdown == 0)
+        statusLabel.setText (e.getStatusText(), dontSendNotification);
+
     if (statusCountdown > 0 && --statusCountdown == 0)
-        statusLabel.setText (String(), dontSendNotification);
+        statusLabel.setText (e.getStatusText(), dontSendNotification);
 }
 
 void MementoAudioProcessorEditor::setStatus (const String& text, int ticks)
@@ -389,6 +536,15 @@ void MementoAudioProcessorEditor::exportSlotStem (int slotIndex)
             setStatus (ok ? juce::String::fromUTF8 ("Stem export\xC3\xA9 \xE2\x86\x92 ") + dir.getFileName()
                           : juce::String::fromUTF8 ("\xC3\x89" "chec de l'export (slot vide ?)"));
         });
+}
+
+void MementoAudioProcessorEditor::startStemDrag (int slotIndex)
+{
+    auto f = processor.getEngine().writeStemToTemp (slotIndex);
+    if (f.existsAsFile())
+        performExternalDragDropOfFiles (StringArray (f.getFullPathName()), false, this);
+    else
+        setStatus (juce::String::fromUTF8 ("Rien \xC3\xA0 glisser (slot vide ?)"));
 }
 
 void MementoAudioProcessorEditor::generateRoll()
