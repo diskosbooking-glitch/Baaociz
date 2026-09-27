@@ -387,7 +387,7 @@ void MementoAudioProcessorEditor::exportSlotStem (int slotIndex)
             if (! dir.isDirectory()) return;
             bool ok = processor.getEngine().exportStem (slotIndex, dir);
             setStatus (ok ? juce::String::fromUTF8 ("Stem export\xC3\xA9 \xE2\x86\x92 ") + dir.getFileName()
-                          : juce::String::fromUTF8 ("\xC3\x89chec de l'export (slot vide ?)"));
+                          : juce::String::fromUTF8 ("\xC3\x89" "chec de l'export (slot vide ?)"));
         });
 }
 
