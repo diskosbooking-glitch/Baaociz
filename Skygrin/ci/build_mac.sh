@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-#  Skygrin - build macOS (AU + VST3) + installateur .pkg
+#  Skygrin - build macOS (AU + VST3) -> .dmg a glisser-deposer + .pkg de secours
 #
 set -euo pipefail
 
@@ -27,11 +27,33 @@ ls -d "$AU" "$VST3"
 codesign --force --deep --sign - "$AU"
 codesign --force --deep --sign - "$VST3"
 
-STAGE="build/stage"
 OUT="build/out"
-rm -rf "$STAGE" "$OUT"
-mkdir -p "$STAGE/Components" "$STAGE/VST3" "$OUT"
+rm -rf "$OUT"
+mkdir -p "$OUT"
 
+# ---- .dmg : on l'ouvre et on glisse chaque plugin sur le raccourci de son dossier
+DMGROOT="build/dmgroot"
+rm -rf "$DMGROOT"
+mkdir -p "$DMGROOT"
+cp -R "$AU"   "$DMGROOT/"
+cp -R "$VST3" "$DMGROOT/"
+ln -s "/Library/Audio/Plug-Ins/Components" "$DMGROOT/Components (glisser ici)"
+ln -s "/Library/Audio/Plug-Ins/VST3"       "$DMGROOT/VST3 (glisser ici)"
+
+DMG="$OUT/Skygrin-${VERSION}.dmg"
+for attempt in 1 2 3 4 5; do
+    if hdiutil create -volname "Skygrin ${VERSION}" -srcfolder "$DMGROOT" -ov -format UDZO "$DMG"; then
+        break
+    fi
+    if [ "$attempt" -eq 5 ]; then echo ">>> hdiutil : echec definitif"; exit 1; fi
+    echo ">>> hdiutil a echoue (essai ${attempt}), nouvel essai dans 10 s"
+    sleep 10
+done
+
+# ---- .pkg de secours : installation AU + VST3 en une commande Terminal
+STAGE="build/stage"
+rm -rf "$STAGE"
+mkdir -p "$STAGE/Components" "$STAGE/VST3"
 cp -R "$AU"   "$STAGE/Components/"
 cp -R "$VST3" "$STAGE/VST3/"
 
@@ -41,4 +63,5 @@ pkgbuild --identifier com.aociz.skygrin.pkg \
          --install-location /Library/Audio/Plug-Ins \
          "$OUT/Skygrin-${VERSION}.pkg"
 
-echo ">>> OK : $OUT/Skygrin-${VERSION}.pkg"
+echo ">>> OK :"
+ls -la "$OUT"
