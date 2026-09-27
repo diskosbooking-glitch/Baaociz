@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# Build de Memento (instrument AU) + fabrication d'un installateur .pkg.
+# Build de Memento (instrument AU) + fabrication d'un .dmg à glisser.
 # Appelé par GitHub Actions (runner macOS). Compile en universel (arm64+x86_64).
 # ---------------------------------------------------------------------------
 set -euo pipefail
@@ -24,18 +24,18 @@ COMPONENT="$(find build -type d -name 'Memento.component' -path '*/AU/*' | head 
 if [ -z "$COMPONENT" ]; then echo "ERREUR : Memento.component introuvable"; find build -name '*.component' -maxdepth 6; exit 1; fi
 echo "==> Composant : $COMPONENT"
 
-echo "==> Fabrication du .pkg"
-STAGE="build/pkgroot"
+echo "==> Fabrication du .dmg (glisser-déposer vers Components)"
+STAGE="build/dmgroot"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp -R "$COMPONENT" "$STAGE/"
+# raccourci pratique vers le dossier d'installation des AU
+ln -s "/Library/Audio/Plug-Ins/Components" "$STAGE/Components (glisser ici)"
 
-pkgbuild \
-  --identifier "com.aociz.memento.pkg" \
-  --version "$VERSION" \
-  --install-location "/Library/Audio/Plug-Ins/Components" \
-  --root "$STAGE" \
-  "build/Memento-${VERSION}.pkg"
+DMG="build/Memento-${VERSION}.dmg"
+rm -f "$DMG"
+hdiutil create -volname "Memento ${VERSION}" \
+  -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 
-echo "==> OK : build/Memento-${VERSION}.pkg"
-ls -la build/*.pkg
+echo "==> OK : $DMG"
+ls -la build/*.dmg
