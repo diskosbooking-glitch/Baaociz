@@ -1,48 +1,56 @@
-# Skygrin v0.3.0 — Aociz
+# Skygrin v0.5.0 — Aociz
 
 Effet de build-up AU + VST3 (macOS). Un seul potard **Intensity**.
 
-## L'erreur des versions precedentes
+## Historique des corrections
 
-En v0.1 puis v0.2, le potard pilotait la QUANTITE d'effet pendant qu'un LFO
-libre pilotait la HAUTEUR. Les deux n'etaient pas correles : tourner le potard
-ne faisait donc monter quoi que ce soit, et la hauteur rebouclait toute seule
-(« ca redescend puis ca remonte »).
+**v0.1** — le potard pilotait la quantite d'effet, rien ne montait. Le niveau
+baissait meme quand on montait le potard. Le frequency shifter etait sur le
+signal direct et rendait tout metallique.
 
-La v0.2 utilisait en plus un Shepard tone. Mesure faite, il etait correctement
-realise — barycentre spectral pondere en sonie stable a 0,03 octave pres — mais
-c'est le concept qui ne convient pas ici : un Shepard tone est fait pour tourner
-indefiniment sans jamais arriver nulle part. Sur un build-up de huit mesures, on
-veut l'inverse : partir d'en bas, arriver en haut, atterrir sur le drop.
+**v0.2** — ajout d'un Shepard tone. Correctement realise mais mauvais concept :
+un Shepard tone tourne indefiniment sans jamais arriver nulle part, alors qu'un
+build-up doit partir d'en bas et atterrir en haut.
 
-## v0.3 : tout est pilote par la position du potard
+**v0.3** — la hauteur est pilotee par la position du potard. Riser harmonique
+(sinusoides) de 110 Hz a 2 490 Hz sur 4,5 octaves.
 
-**Riser** — cinq partiels harmoniques (1, 2, 3, 4, 5), donc une seule hauteur
-franche. La fondamentale vaut 110 Hz a 0 % et 2 490 Hz a 100 %, soit 4,5 octaves.
-Verification faite sur une montee de huit mesures a 128 BPM : 0 fenetre d'analyse
-sur 173 ou la hauteur redescend.
+**v0.4** — riser harmonique remplace par deux bandes de bruit tres resonantes.
+Jamais compilee : envoyee a la racine du depot au lieu du dossier Skygrin.
 
-**Barber pole filter** — six passe-bande dont les frequences centrales balayent
-85 % de leur etendue au fil du potard, donc sans jamais boucler pendant une
-montee. Ce sont les frequences de ton morceau que l'on entend monter.
-Le banc perd 13 dB par rapport a l'entree (mesure sur bruit blanc) ; un gain de
-compensation de 2,8 est applique.
+**v0.5** — plus aucune note qui monte. La sinusoide est supprimee du code, et
+les bandes resonantes de la v0.4 (Q jusqu'a 28, elles sifflaient comme une note
+sur les presets durs) sont remplacees par un souffle sans resonance.
+Colonnes RISER et RES retirees de `Presets.h`.
 
-**Bruit** — bande resonante calee sur le double de la fondamentale du riser,
-facteur de qualite de 1,5 a 7,5.
+## Le souffle qui monte
 
-**Delay** — le frequency shifter est dans la boucle de feedback uniquement :
-chaque repetition remonte de quelques hertz, l'echo grimpe en escalier. Le temps
-du delay raccourcit de 1/4 vers 1/16.
+Bruit blanc filtre par un passe-haut puis un passe-bas Butterworth (Q = 0,707,
+aucune bosse de resonance), places une octave de part et d'autre d'un centre
+qui suit le potard : 220 Hz a 0 %, 5 kHz a 100 % (la course validee en v0.3).
+Bande de deux octaves : on entend le bruit s'eclaircir, jamais une hauteur.
+Le lit de bruit large de la v0.4 (le cote noye) est conserve.
 
-**Gate** — synchro tempo, passe de 1/8 a 1/32 sur les presets durs.
+Niveau : colonne NOISE dans `Presets.h` ; gain du souffle 0,27 dans
+`PluginProcessor.cpp` (2 dB sous les bandes de la v0.4, pondere K).
 
-Le gain de sortie monte avec l'intensite (il baissait en v0.1).
+Verification hors DAW (vrais fichiers source, JUCE 8.0.4, 8 presets, potard
+0 -> 100 %, entree silencieuse) : pic le plus saillant au-dessus de son
+voisinage = 33 a 49 dB en v0.3, 9 a 17 dB en v0.4, 4,6 a 6,8 dB en v0.5
+(bruit pur : 4,6 a 5 dB). Niveau de sortie sur un signal reel inchange.
+
+## Ce qui monte encore
+
+Uniquement le morceau lui-meme, rien n'est ajoute : le barber pole filter fait
+defiler ses frequences vers le haut, le passe-haut resonant balaye le grave,
+et chaque repetition du delay remonte un peu (frequency shifter dans la boucle).
 
 ## Chaine complete
 
-passe-haut resonant -> passe-bas -> barber pole filter -> + riser -> + bruit
--> delay (shifter dans le feedback) -> saturation -> gate -> reverbe -> plafond doux
+passe-haut resonant -> passe-bas -> barber pole filter -> + souffle
+-> delay (frequency shifter dans la boucle de feedback, temps qui raccourcit
+de 1/4 vers 1/16) -> saturation -> gate synchro qui s'accelere -> reverbe
+-> plafond doux
 
 ## Presets
 
@@ -50,9 +58,14 @@ Warm Up · Fist Pump · Balloon Head · Tunnel Vision · Barber Pole · Rocket F
 Jaw Drop · Meltdown
 
 Courbes dans `Source/Presets.h` : amount = valeur a 100 %, exp = forme de la
-courbe. Modifiable sans toucher au DSP.
+courbe.
 
-## Mise a jour
+## Compilation et installation
 
-Changer `project(Skygrin VERSION x.y.z)` dans `CMakeLists.txt`, renvoyer les
-fichiers sur GitHub, recuperer le .pkg dans Actions -> Artifacts.
+GitHub Actions (workflow « Build Skygrin (macOS) ») produit l'artefact
+**Skygrin-Mac** : `Skygrin-x.y.z.dmg` (a ouvrir, puis glisser Skygrin.component
+sur « Components (glisser ici) » et Skygrin.vst3 sur « VST3 (glisser ici) »)
+et `Skygrin-x.y.z.pkg` en secours (`sudo installer -pkg ... -target /`).
+
+Pour une nouvelle version : changer `project(Skygrin VERSION x.y.z)` dans
+`CMakeLists.txt`, envoyer les fichiers DANS le dossier Skygrin du depot.
