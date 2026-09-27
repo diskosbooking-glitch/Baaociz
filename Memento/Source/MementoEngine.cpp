@@ -1,5 +1,4 @@
 #include "MementoEngine.h"
-#include <SoundTouch.h>
 #include <regex>
 #include <cmath>
 #include <algorithm>
@@ -319,58 +318,29 @@ std::shared_ptr<StretchedClip> MementoEngine::makeClip (const Record& rec)
     const double bpm    = hostBpm.load();
     const double tempoRatio = (srcBpm > 0.0) ? juce::jlimit (0.25, 4.0, bpm / srcBpm) : 1.0;
 
-    // --- SoundTouch (interleaved, au SR du fichier) ---
-    soundtouch::SoundTouch st;
-    st.setSampleRate ((unsigned) fileSr);
-    st.setChannels ((unsigned) fileCh);
-    st.setTempo (tempoRatio);
-    st.setSetting (SETTING_USE_QUICKSEEK, 0);
-    st.setSetting (SETTING_USE_AA_FILTER, 1);
+    // Calage au tempo par ré-échantillonnage (v0.1) : on relit la source à la
+    // vitesse tempoRatio et on ramène au SR de l'hôte en une seule passe. La
+    // hauteur suit le tempo (façon vinyle) ; le stretch à hauteur préservée
+    // (SoundTouch) reviendra en v0.2.
+    // sortie i (au SR hôte) -> position source = i * tempoRatio * fileSr / hostSr
+    const double step = tempoRatio * fileSr / sr;
+    const int    srcN = src.getNumSamples();
+    const int64  outFrames = (int64) std::floor ((double) (srcN - 1) / juce::jmax (1.0e-6, step));
+    if (outFrames < 64) return nullptr;
 
-    std::vector<float> interleaved ((size_t) frames * (size_t) fileCh);
-    for (int64 i = 0; i < frames; ++i)
-        for (int c = 0; c < fileCh; ++c)
-            interleaved[(size_t) (i * fileCh + c)] = src.getSample (juce::jmin (c, src.getNumChannels() - 1), (int) i);
-
-    std::vector<float> outBuf;
-    outBuf.reserve ((size_t) ((double) frames / tempoRatio + 4096.0) * (size_t) fileCh);
-    const unsigned block = 4096;
-    std::vector<float> recv ((size_t) block * (size_t) fileCh);
-
-    int64 fed = 0;
-    while (fed < frames)
-    {
-        unsigned n = (unsigned) juce::jmin ((int64) block, frames - fed);
-        st.putSamples (&interleaved[(size_t) (fed * fileCh)], n);
-        fed += n;
-        unsigned got;
-        while ((got = st.receiveSamples (recv.data(), block)) > 0)
-            outBuf.insert (outBuf.end(), recv.begin(), recv.begin() + (size_t) got * fileCh);
-    }
-    st.flush();
-    unsigned got;
-    while ((got = st.receiveSamples (recv.data(), block)) > 0)
-        outBuf.insert (outBuf.end(), recv.begin(), recv.begin() + (size_t) got * fileCh);
-
-    const int64 stFrames = (int64) (outBuf.size() / (size_t) fileCh);
-    if (stFrames < 64) return nullptr;
-
-    // --- resample fileSr -> hostSr (linéaire), sortie stéréo ---
-    const double ratio = sr / fileSr;
-    const int64 outFrames = (int64) std::floor (stFrames * ratio);
     auto clip = std::make_shared<StretchedClip>();
     clip->buffer.setSize (2, (int) outFrames, false, true, true);
     for (int64 i = 0; i < outFrames; ++i)
     {
-        double srcPos = (double) i / ratio;
-        int64 i0 = (int64) srcPos;
-        int64 i1 = juce::jmin (i0 + 1, stFrames - 1);
-        float frac = (float) (srcPos - (double) i0);
+        double sp = (double) i * step;
+        int64 i0 = (int64) sp;
+        int64 i1 = juce::jmin (i0 + 1, (int64) srcN - 1);
+        float frac = (float) (sp - (double) i0);
         for (int c = 0; c < 2; ++c)
         {
             int sc = juce::jmin (c, fileCh - 1);
-            float a = outBuf[(size_t) (i0 * fileCh + sc)];
-            float b = outBuf[(size_t) (i1 * fileCh + sc)];
+            float a = src.getSample (sc, (int) i0);
+            float b = src.getSample (sc, (int) i1);
             clip->buffer.setSample (c, (int) i, a + (b - a) * frac);
         }
     }
