@@ -5,19 +5,24 @@
 #include <vector>
 
 // ===========================================================================
-// Memento — moteur d'assemblage (v0.1).
+// Memento — moteur d'assemblage (v0.2).
 //   • SampleLibrary : scan récursif d'un dossier, parsing BPM + rôle depuis le
 //     nom de fichier (repris de l'app Electron Memento).
 //   • Assembler     : slots par rôle, reroll/lock, rendu offline calé au tempo
-//     de l'hôte (SoundTouch), et mixage multi-voix synchronisé dans process().
-// Le rendu (chargement + time-stretch) tourne sur un thread de fond ; le thread
+//     de l'hôte, et mixage multi-voix synchronisé dans process().
+//   • Styles        : découverte dynamique de sous-dossiers /styles/<nom>/.
+//   • Rolls         : slots rythmiques (retrigger sur la grille + variations)
+//                     et slots "boucle de style" (pioche calée au tempo).
+//   • Export stems  : un WAV 32-bit float par slot, longueur calée sur les
+//                     mesures, prêt à réimporter dans un DAW.
+// Le rendu (chargement + calage) tourne sur un thread de fond ; le thread
 // audio ne fait que lire des buffers déjà prêts (échange atomique de pointeur).
 // ===========================================================================
 
 namespace mem
 {
 
-enum class Role { Drums, Perc, Bass, Tonal, Texture, Vox, Fx, NumRoles };
+enum class Role { Drums, Perc, Bass, Tonal, Texture, Vox, Fx, Roll, NumRoles };
 
 inline const char* roleLabel (Role r)
 {
@@ -29,9 +34,13 @@ inline const char* roleLabel (Role r)
         case Role::Texture: return "Texture";
         case Role::Vox:     return "Vox";
         case Role::Fx:      return "FX";
+        case Role::Roll:    return "Roll";
         default:            return "?";
     }
 }
+
+// D'où provient le contenu d'un slot.
+enum class SlotSource { Library, StyleLoop, Roll };
 
 // Un enregistrement de la bibliothèque.
 struct Record
@@ -53,11 +62,24 @@ struct StretchedClip
     int                      sourceBpm = 0;
 };
 
+// Un style découvert dans le dossier /styles/.
+struct StyleInfo
+{
+    juce::String       name;   // = nom du sous-dossier
+    juce::File         dir;
+    juce::Array<juce::File> files;   // fichiers audio du style
+};
+
 // Un slot d'assemblage.
 struct Slot
 {
-    Role role = Role::Drums;
-    int  recordIndex = -1;
+    Role       role   = Role::Drums;
+    SlotSource source = SlotSource::Library;
+
+    int          recordIndex = -1;   // source Library : index dans records
+    juce::File   fileSource;         // source StyleLoop / Roll : fichier choisi
+    juce::String styleName;          // source StyleLoop / Roll : style courant
+    int          rollSeed = 0;       // source Roll : graine de variation
 
     // clip courant — accédé en atomique (std::atomic_load/store sur shared_ptr)
     std::shared_ptr<StretchedClip> clip;
@@ -91,6 +113,11 @@ public:
     int  getUsableCount() const;
     bool isScanning() const { return scanning.load(); }
 
+    // --- styles ---
+    void setStylesFolder (const juce::File& folder);   // bouton STYLES
+    juce::File getStylesFolder() const { return stylesFolder; }
+    juce::StringArray getStyleNames() const;           // découverte dynamique
+
     // --- tempo hôte ---
     void setHostBpm (double bpm);
     double getHostBpm() const { return hostBpm.load(); }
@@ -100,27 +127,35 @@ public:
     Slot* getSlot (int i) { return (i >= 0 && i < (int) slots.size()) ? slots[(size_t) i].get() : nullptr; }
     void  setDefaultSlots();                 // Drums/Bass/Tonal/Texture/Vox
     void  addSlot (Role role);
+    void  addStyleLoopSlot (const juce::String& style);  // pioche une boucle du style
+    void  addRollSlot (const juce::String& style);       // roll rythmique généré
     void  removeSlot (int index);
 
-    void  rerollSlot (int index);
+    void  rerollSlot (int index);            // (re)génère selon la source du slot
     void  rerollAll();                       // slots non verrouillés
 
+    // --- export stems (thread message) ---
+    // Écrit un WAV 32-bit float par slot ; longueur = boucle calée sur les
+    // mesures. Renvoie true / le nombre de fichiers écrits.
+    bool exportStem     (int slotIndex, const juce::File& destDir);
+    int  exportAllStems (const juce::File& destDir);
+
     // --- lecture (thread audio) ---
-    // hostPosSamples = position de lecture de l'hôte convertie en échantillons
-    // (ppq * samplesParBeat) ; garantit un calage sur la grille de mesures.
     void  process (juce::AudioBuffer<float>& out, juce::int64 hostPosSamples, bool playing);
 
-    // --- persistance (chemin dossier + rôles des slots) ---
+    // --- persistance ---
     juce::String saveStateString() const;
     void         loadStateString (const juce::String& s);
 
     std::function<void()> onLibraryChanged;   // notif UI (thread message)
     std::function<void()> onSlotsChanged;     // notif UI
+    std::function<void()> onStylesChanged;    // notif UI
 
 private:
     // Thread de rendu.
     void run() override;
     void doScan (const juce::File& folder);
+    void doStyleScan();
     void requestRender (int slotIndex);
     void requestRenderAll();
     void renderSlot (int slotIndex);
@@ -129,8 +164,16 @@ private:
     std::vector<int> candidatesForRole (Role role) const;
     int  pickForRole (Role role, int avoidIndex) const;
 
-    // Rendu offline (chargement + stretch + resample).
-    std::shared_ptr<StretchedClip> makeClip (const Record& rec);
+    // Styles (thread message : lecture cache).
+    juce::Array<juce::File> filesForStyle (const juce::String& style) const;
+
+    // Rendu offline.
+    static Record recordFromFile (const juce::File& f);
+    std::shared_ptr<StretchedClip> makeClip     (const Record& rec);   // boucle calée au tempo
+    std::shared_ptr<StretchedClip> makeRollClip (const juce::File& src, int seed);  // roll rythmique
+    std::shared_ptr<StretchedClip> loadResampled (const juce::File& f, double maxSeconds, int& outFileCh);
+
+    bool writeClipToWav (const StretchedClip& clip, const juce::File& outFile) const;
 
     // --- données ---
     juce::File              libraryFolder;
@@ -140,17 +183,22 @@ private:
     double                  sr = 44100.0;
     std::atomic<bool>       scanning { false };
 
+    juce::File              stylesFolder;            // racine explicite (bouton STYLES)
+    std::vector<StyleInfo>  styleList;               // cache (verrou stylesLock)
+
     juce::AudioFormatManager formatManager;
     mutable juce::Random    rng;
 
-    // Verrous : données (records) et structure des slots.
+    // Verrous : données (records), structure des slots, styles.
     mutable juce::CriticalSection dataLock;
     mutable juce::CriticalSection slotsLock;
+    mutable juce::CriticalSection stylesLock;
 
-    // File de rendu (indices de slots à (re)rendre) + scan en attente.
+    // File de rendu (indices de slots à (re)rendre) + scans en attente.
     juce::CriticalSection   jobLock;
     std::vector<int>        jobQueue;
     juce::File              pendingScan;
+    std::atomic<bool>       pendingStyleRescan { false };
     juce::WaitableEvent     jobEvent;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MementoEngine)
