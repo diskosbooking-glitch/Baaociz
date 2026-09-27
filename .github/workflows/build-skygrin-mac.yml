@@ -7,6 +7,9 @@ on:
       - '.github/workflows/build-skygrin-mac.yml'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-14
@@ -23,3 +26,17 @@ jobs:
           name: Skygrin-Mac
           path: Skygrin/build/out/
           if-no-files-found: error
+
+      - name: Release (lien de telechargement direct)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(grep -m1 -Eo 'VERSION[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+' Skygrin/CMakeLists.txt | awk '{print $2}')"
+          TAG="skygrin-v${VERSION}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" Skygrin/build/out/* --clobber
+          else
+            gh release create "$TAG" Skygrin/build/out/* --target "$GITHUB_SHA" \
+              --title "Skygrin ${VERSION}" \
+              --notes "Build automatique AU + VST3. Ouvrir le .dmg et glisser chaque plugin sur son raccourci."
+          fi
