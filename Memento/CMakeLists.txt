@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.22)
 # ---------------------------------------------------------------------------
 
 # Le numéro de version du plugin vit ICI (comme pour Subshaper/Skygrin).
-project(Memento VERSION 0.1.0 LANGUAGES C CXX)
+project(Memento VERSION 0.1.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -31,16 +31,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(juce)
 
-# --- SoundTouch (time-stretch) --------------------------------------------
-# Récupéré à la configuration sur le runner GitHub Actions (rien à vendorer).
-set(SOUNDTOUCH_DLL OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-  soundtouch
-  GIT_REPOSITORY https://codeberg.org/soundtouch/soundtouch.git
-  GIT_TAG        2.3.3
-  GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(soundtouch)
+# v0.1 : calage au tempo par ré-échantillonnage intégré (aucune dépendance
+# externe). Le time-stretch à hauteur préservée (SoundTouch) reviendra en v0.2.
 
 # ---------------------------------------------------------------------------
 juce_add_plugin(Memento
@@ -74,11 +66,8 @@ target_compile_definitions(Memento PUBLIC
   JUCE_DISPLAY_SPLASH_SCREEN=0
 )
 
-# SoundTouch expose sa cible "SoundTouch".
 target_link_libraries(Memento PRIVATE
-  SoundTouch
   juce::juce_audio_utils
-  juce::juce_dsp
   juce::juce_recommended_config_flags
   juce::juce_recommended_lto_flags
   juce::juce_recommended_warning_flags
