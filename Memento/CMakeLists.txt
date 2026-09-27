@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.22)
 # ---------------------------------------------------------------------------
 
 # Le numéro de version du plugin vit ICI (comme pour Subshaper/Skygrin).
-project(Memento VERSION 0.1.1 LANGUAGES C CXX)
+project(Memento VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
