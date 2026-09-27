@@ -75,11 +75,7 @@ void SkygrinAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     lpFilter.setCutoffFrequency (20000.0f);
     lpFilter.reset();
 
-    noiseFilter.prepare (spec);
-    noiseFilter.setType (juce::dsp::StateVariableTPTFilterType::bandpass);
-    noiseFilter.setResonance (2.0f);
-    noiseFilter.setCutoffFrequency (400.0f);
-    noiseFilter.reset();
+    noiseRiser.prepare (spec);
 
     reverb.prepare (spec);
     reverb.reset();
@@ -88,7 +84,6 @@ void SkygrinAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBloc
     delayLine.reset();
 
     barber.prepare (spec);
-    riser.prepare (sampleRate);
 
     for (int ch = 0; ch < 2; ++ch)
         shifter[ch].prepare (sampleRate);
@@ -161,19 +156,16 @@ void SkygrinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         lpFilter.setCutoffFrequency (juce::jlimit (300.0f, nyq,
                                      20000.0f * std::pow (0.025f, cur[ModLowpass])));
 
-        // --- les deux modules qui font monter, tous deux pilotes par t ------
+        // --- ce qui fait monter, pilote par la position du potard -----------
+        //  barber pole : les frequences du morceau defilent vers le haut
+        //  souffle     : bruit non resonant qui s'eclaircit, aucune note
         barber.update (t);
-        riser.update (t);
+        noiseRiser.update (t);
 
-        const float barberMix = cur[ModBarber];
-        const float riserGain = cur[ModRiser] * 0.35f;
-
-        //  la bande de bruit suit la meme trajectoire que le riser
-        const float noiseGain = cur[ModNoise] * 0.16f;
-        const bool  useNoise  = noiseGain > 0.0008f;
-        noiseFilter.setCutoffFrequency (juce::jlimit (80.0f, nyq,
-                                        (float) riser.getFundamental() * 2.0f));
-        noiseFilter.setResonance (1.5f + 6.0f * t);
+        const float barberMix  = cur[ModBarber];
+        const float noiseSweep = cur[ModNoise] * 0.27f;   // 2 dB sous les bandes de la v0.4
+        const float noiseBed   = cur[ModNoise] * 0.13f;
+        const bool  useNoise   = cur[ModNoise] > 0.002f;
 
         const float driveGain = juce::Decibels::decibelsToGain (cur[ModDrive] * 22.0f);
         const float driveComp = std::pow (driveGain, -0.55f);
@@ -207,9 +199,6 @@ void SkygrinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         {
             const int idx = pos + s;
 
-            const float riserSample = (riserGain > 0.0005f)
-                                        ? riser.process() * riserGain : 0.0f;
-
             gatePhase += gateInc;
             if (gatePhase >= 1.0) gatePhase -= 1.0;
             const float gateWin = 0.5f + 0.5f * (float) std::cos (juce::MathConstants<double>::twoPi * gatePhase);
@@ -228,13 +217,10 @@ void SkygrinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
                     x = x * (1.0f - barberMix) + b * barberMix;
                 }
 
-                x += riserSample;
-
                 if (useNoise)
                 {
-                    float nz = noiseRng.nextFloat() * 2.0f - 1.0f;
-                    nz = noiseFilter.processSample (ch, nz);
-                    x += nz * noiseGain;
+                    const float nz = noiseRng.nextFloat() * 2.0f - 1.0f;
+                    x += noiseRiser.process (ch, nz, noiseSweep, noiseBed);
                 }
 
                 // delay dont la boucle de feedback remonte a chaque passage
@@ -255,7 +241,7 @@ void SkygrinAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
 
         hpFilter.snapToZero();
         lpFilter.snapToZero();
-        noiseFilter.snapToZero();
+        noiseRiser.snapToZero();
         barber.snapToZero();
 
         if (useReverb)

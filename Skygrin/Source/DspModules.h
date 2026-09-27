@@ -84,82 +84,10 @@ private:
 };
 
 //==============================================================================
-//  RISER
-//
-//  La hauteur est pilotee DIRECTEMENT par la position du potard : a 0 % la
-//  fondamentale est en bas, a 100 % elle est en haut, 4,5 octaves plus loin.
-//  C'est le point qui manquait dans les versions precedentes, ou un LFO libre
-//  faisait monter puis redescendre la hauteur independamment du potard : rien
-//  ne progressait, ca rebouclait.
-//
-//  Les partiels sont harmoniques (1, 2, 3, 4, 5) et non espaces d'une octave :
-//  on entend donc une seule hauteur, franche, qui monte une fois et arrive.
-//==============================================================================
-class Riser
-{
-public:
-    static constexpr int H = 5;
-
-    void prepare (double sampleRate)
-    {
-        sr = sampleRate;
-        reset();
-    }
-
-    void reset()
-    {
-        for (int i = 0; i < H; ++i) { phase[i] = 0.0; inc[i] = 0.0; amp[i] = 0.0f; }
-    }
-
-    void update (float intensity)
-    {
-        const double f0  = baseHz * std::pow (2.0, (double) intensity * octaveSpan);
-        const double nyq = sr * 0.45;
-
-        float total = 0.0f;
-        for (int i = 0; i < H; ++i)
-        {
-            const double f = f0 * (double) (i + 1);
-            if (f >= nyq) { amp[i] = 0.0f; inc[i] = 0.0; continue; }
-            amp[i] = 1.0f / (float) (i + 1);
-            inc[i] = f / sr;
-            total += amp[i];
-        }
-        if (total > 0.0f)
-            for (int i = 0; i < H; ++i) amp[i] /= total;
-
-        currentF0 = f0;
-    }
-
-    inline float process() noexcept
-    {
-        float out = 0.0f;
-        for (int i = 0; i < H; ++i)
-        {
-            if (amp[i] <= 0.0f) continue;
-            out += amp[i] * (float) std::sin (juce::MathConstants<double>::twoPi * phase[i]);
-            phase[i] += inc[i];
-            if (phase[i] >= 1.0) phase[i] -= 1.0;
-        }
-        return out;
-    }
-
-    double getFundamental() const noexcept { return currentF0; }
-
-private:
-    double sr         = 44100.0;
-    double baseHz     = 110.0;
-    double octaveSpan = 4.5;
-    double currentF0  = 110.0;
-    double phase[H] {};
-    double inc[H]   {};
-    float  amp[H]   {};
-};
-
-//==============================================================================
 //  BARBER POLE FILTER
 //
-//  Meme illusion, mais appliquee au signal d'entree plutot qu'a des sinus.
+//  Illusion de montee appliquee au signal d'entree lui-meme : ce filtre
+//  n'ajoute aucun son, il fait defiler vers le haut les frequences du morceau.
 //  Six passe-bande dont les frequences centrales glissent vers le haut en
 //  permanence, espacees regulierement sur sept octaves, chacun avec sa propre
 //  fenetre d'amplitude. C'est ce qui fait "monter" un morceau complet : ce sont
@@ -233,6 +161,75 @@ private:
     double phase        = 0.0;
     double fMin         = 70.0;
     double spanOctaves  = 7.0;
+};
+
+//==============================================================================
+//  NOISE RISER  (v0.5 : un souffle qui monte, sans aucune note)
+//
+//  v0.3 ajoutait une sinusoide qui montait jusqu'a 2,5 kHz. v0.4 la remplacait
+//  par deux bandes de bruit tres resonantes (Q jusqu'a 28) : sur les presets
+//  durs, elles sifflaient comme une note et on retrouvait le meme defaut.
+//
+//  Ici plus rien de tonal :
+//   - le souffle passe dans un passe-haut puis un passe-bas Butterworth
+//     (Q = 0,707 : aucune bosse de resonance, gain crete mesure -0,4 dB),
+//     places une octave de part et d'autre du centre. Deux octaves de large :
+//     on entend du bruit qui s'eclaircit, jamais une hauteur.
+//   - le centre suit la course validee en v0.3 : 220 Hz a 0 %, 5 kHz a 100 %.
+//   - le lit de bruit large de la v0.4 (le cote noye) est garde tel quel.
+//==============================================================================
+class NoiseRiser
+{
+public:
+    void prepare (const juce::dsp::ProcessSpec& spec)
+    {
+        sr = spec.sampleRate;
+
+        sweepHp.prepare (spec);
+        sweepHp.setType (juce::dsp::StateVariableTPTFilterType::highpass);
+        sweepHp.setResonance (butterworthQ);
+
+        sweepLp.prepare (spec);
+        sweepLp.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
+        sweepLp.setResonance (butterworthQ);
+
+        bed.prepare (spec);
+        bed.setType (juce::dsp::StateVariableTPTFilterType::bandpass);
+        bed.setResonance (0.7f);
+
+        update (0.0f);
+        reset();
+    }
+
+    void reset() { sweepHp.reset(); sweepLp.reset(); bed.reset(); }
+
+    void update (float intensity)
+    {
+        const double nyq    = sr * 0.45;
+        const double centre = startHz * std::pow (2.0, (double) intensity * octaveSpan);
+
+        sweepHp.setCutoffFrequency ((float) juce::jlimit (20.0, nyq, centre * 0.5));
+        sweepLp.setCutoffFrequency ((float) juce::jlimit (40.0, nyq, centre * 2.0));
+        bed.setCutoffFrequency     ((float) juce::jlimit (100.0, nyq,
+                                     400.0 + 3000.0 * (double) intensity));
+    }
+
+    inline float process (int channel, float noise, float sweepGain, float bedGain) noexcept
+    {
+        const float sw = sweepLp.processSample (channel, sweepHp.processSample (channel, noise));
+        const float bd = bed.processSample (channel, noise);
+        return sw * sweepGain + bd * bedGain;
+    }
+
+    void snapToZero() noexcept { sweepHp.snapToZero(); sweepLp.snapToZero(); bed.snapToZero(); }
+
+private:
+    static constexpr float  butterworthQ = 0.70710678f;
+    static constexpr double startHz      = 220.0;
+    static constexpr double octaveSpan   = 4.5;
+
+    juce::dsp::StateVariableTPTFilter<float> sweepHp, sweepLp, bed;
+    double sr = 44100.0;
 };
 
 //==============================================================================

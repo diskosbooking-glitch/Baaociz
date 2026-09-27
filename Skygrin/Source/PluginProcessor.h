@@ -47,12 +47,12 @@ private:
     juce::SmoothedValue<float> intensitySmoothed;
     float cur[NumMods] = { 0.0f };
 
-    juce::dsp::StateVariableTPTFilter<float> hpFilter, lpFilter, noiseFilter;
+    juce::dsp::StateVariableTPTFilter<float> hpFilter, lpFilter;
     juce::dsp::Reverb reverb;
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Lagrange3rd> delayLine { 192000 };
 
     BarberFilter barber;
-    Riser        riser;
+    NoiseRiser   noiseRiser;
     FreqShifter  shifter[2];
     juce::Random noiseRng;
 
