@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build AU + VST3 + pkg
+      - name: Build AU + VST3 + dmg
         run: |
           chmod +x Skygrin/ci/build_mac.sh
           ./Skygrin/ci/build_mac.sh
@@ -21,4 +21,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Skygrin-Mac
-          path: Skygrin/build/out/*.pkg
+          path: Skygrin/build/out/
+          if-no-files-found: error
