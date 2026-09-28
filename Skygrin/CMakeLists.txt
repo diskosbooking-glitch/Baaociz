@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 
 # ---- Numero de version du plugin : incrementer a chaque mise a jour ----
-project(Skygrin VERSION 0.5.0)
+project(Skygrin VERSION 0.6.0)
 
-set(CMAKE_CXX_STANDARD 17)
+# C++20 : initialiseurs designes pour des presets lisibles (Presets.h)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
