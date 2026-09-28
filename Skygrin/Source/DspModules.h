@@ -233,4 +233,98 @@ private:
 };
 
 //==============================================================================
+//  PITCH SHIFTER  (v0.6 : la montee en hauteur du morceau lui-meme)
+//
+//  Pitch shifter temporel a deux tetes de lecture (principe du "harmonizer") :
+//   - on ecrit le signal dans un tampon circulaire ;
+//   - deux tetes le relisent avec un retard qui diminue en continu : relire
+//     plus vite qu'on n'ecrit = frequence plus haute (ratio = 2^(demi-tons/12)) ;
+//   - quand une tete arrive au bout de sa fenetre (40 ms), elle saute en
+//     arriere pendant que son gain est a zero ; l'autre tete, decalee d'une
+//     demi-fenetre, est alors a plein gain. Fenetres sin^2 + cos^2 = 1 :
+//     niveau constant, aucun clic.
+//
+//  Phase commune aux deux canaux : l'image stereo reste intacte.
+//  Usage par echantillon : process() pour chaque canal, puis advance().
+//==============================================================================
+class PitchShifter
+{
+public:
+    void prepare (double sampleRate, int numChannels)
+    {
+        window = (float) (sampleRate * 0.040);
+        const int needed = (int) (window + minDelay) + 8;
+        size = juce::nextPowerOfTwo (needed);
+        mask = size - 1;
+        buffer.setSize (juce::jmax (1, numChannels), size);
+        reset();
+    }
+
+    void reset()
+    {
+        buffer.clear();
+        writePos = 0;
+        phase = 0.0f;
+        computeTaps();
+    }
+
+    // Glissement du retard par echantillon : 1 - ratio (negatif = vers l'aigu)
+    void setSemitones (float semitones) noexcept
+    {
+        slope = 1.0f - std::pow (2.0f, semitones / 12.0f);
+    }
+
+    inline float process (int channel, float x) noexcept
+    {
+        float* d = buffer.getWritePointer (channel);
+        d[writePos] = x;
+        return read (d, delay1) * gain1 + read (d, delay2) * gain2;
+    }
+
+    inline void advance() noexcept
+    {
+        writePos = (writePos + 1) & mask;
+
+        phase += slope / window;
+        if (phase >= 1.0f) phase -= 1.0f;
+        if (phase <  0.0f) phase += 1.0f;
+
+        computeTaps();
+    }
+
+private:
+    inline void computeTaps() noexcept
+    {
+        float p2 = phase + 0.5f;
+        if (p2 >= 1.0f) p2 -= 1.0f;
+
+        delay1 = minDelay + phase * window;
+        delay2 = minDelay + p2    * window;
+
+        gain1 = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * phase);   // sin^2
+        gain2 = 1.0f - gain1;                                                         // cos^2
+    }
+
+    inline float read (const float* d, float delaySamples) const noexcept
+    {
+        const float pos  = (float) writePos - delaySamples;
+        const float fl   = std::floor (pos);
+        const float frac = pos - fl;
+        const int   i0   = ((int) fl) & mask;
+        const int   i1   = (i0 + 1) & mask;
+        return d[i0] + frac * (d[i1] - d[i0]);
+    }
+
+    static constexpr float minDelay = 2.0f;
+
+    juce::AudioBuffer<float> buffer;
+    int   size = 0, mask = 0, writePos = 0;
+    float window = 1920.0f;
+    float phase = 0.0f, slope = 0.0f;
+    float delay1 = 0.0f, delay2 = 0.0f, gain1 = 0.0f, gain2 = 1.0f;
+};
+
+//==============================================================================
+//  Soft-clipper utilise par juce::dsp::WaveShaper (fonction sans etat).
+//==============================================================================
 inline float softClip (float x) noexcept { return std::tanh (x); }

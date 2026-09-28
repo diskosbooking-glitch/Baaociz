@@ -63,9 +63,9 @@ void SkygrinLookAndFeel::drawComboBox (juce::Graphics& g, int width, int height,
     auto r = juce::Rectangle<float> (0.0f, 0.0f, (float) width, (float) height).reduced (0.8f);
 
     g.setColour (background);
-    g.fillRoundedRectangle (r, height * 0.5f);
+    g.fillRoundedRectangle (r, (float) height * 0.5f);
     g.setColour (ink.withAlpha (0.55f));
-    g.drawRoundedRectangle (r, height * 0.5f, 1.3f);
+    g.drawRoundedRectangle (r, (float) height * 0.5f, 1.3f);
 
     // petite fleche
     juce::Path arrow;
@@ -212,6 +212,9 @@ SkygrinAudioProcessorEditor::SkygrinAudioProcessorEditor (SkygrinAudioProcessor&
     intensityKnob.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f,
                                        juce::MathConstants<float>::pi * 2.75f, true);
     intensityKnob.setColour (juce::Slider::rotarySliderFillColourId, cold);
+    intensityKnob.setMouseDragSensitivity (320);              // course fine : 320 px pour 0 -> 100 %
+    intensityKnob.setDoubleClickReturnValue (true, 0.0);      // double-clic = retour a 0 % (le drop)
+    intensityKnob.setPopupMenuEnabled (false);
     addAndMakeVisible (intensityKnob);
 
     readout.setJustificationType (juce::Justification::centred);
@@ -247,7 +250,7 @@ void SkygrinAudioProcessorEditor::paint (juce::Graphics& g)
 
     g.setColour (ink.withAlpha (0.45f));
     g.setFont (juce::Font (juce::FontOptions (11.0f)).withExtraKerningFactor (0.2f));
-    g.drawText ("AOCIZ  \xe2\x80\xa2  BUILD-UP MACHINE", 0, 46, getWidth(), 14,
+    g.drawText (juce::String (juce::CharPointer_UTF8 ("AOCIZ  \xe2\x80\xa2  BUILD-UP MACHINE")), 0, 46, getWidth(), 14,
                 juce::Justification::centred);
 
     g.setColour (ink.withAlpha (0.12f));
