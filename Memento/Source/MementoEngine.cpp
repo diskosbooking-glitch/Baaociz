@@ -649,6 +649,73 @@ bool MementoEngine::addRollSlot (const String& style)
     return true;
 }
 
+// Génère un arrangement complet dans le style choisi : chaque piste non-verrouillée
+// reçoit un sample de SON rôle, pris dans le dossier du style (repli : n'importe
+// quel fichier du style). Toutes les pistes partagent donc le même style.
+bool MementoEngine::generateStyleArrangement (const String& style)
+{
+    Array<File> files = filesForStyle (style);
+    if (files.isEmpty()) return false;
+
+    // Regroupe les fichiers du style par rôle (déduit du nom + dossier parent).
+    std::map<int, Array<File>> byRole;
+    for (auto& f : files)
+    {
+        Role r = roleFromName (f.getFileNameWithoutExtension(), f.getParentDirectory().getFileName());
+        byRole[(int) r].add (f);
+    }
+
+    std::vector<int> toRender;
+    {
+        const ScopedLock sl (slotsLock);
+
+        // Set de pistes par défaut si aucune n'existe encore.
+        if (slots.empty())
+            for (Role r : { Role::Drums, Role::Bass, Role::Tonal, Role::Vox })
+            {
+                auto s = std::make_unique<Slot>();
+                s->role = r; s->source = SlotSource::Library;
+                s->tonal.store (roleIsTonal (r));
+                slots.push_back (std::move (s));
+            }
+
+        for (int i = 0; i < (int) slots.size(); ++i)
+        {
+            auto& s = *slots[(size_t) i];
+            if (s.locked.load()) continue;              // on garde les pistes verrouillées
+
+            const Role want = s.role;
+            const Array<File>* pool = nullptr;
+            auto it = byRole.find ((int) want);
+            if (it != byRole.end() && ! it->second.isEmpty()) pool = &it->second;
+            const Array<File>& chosen = (pool != nullptr) ? *pool : files;
+
+            File pick = chosen[rng.nextInt (chosen.size())];
+
+            resetSlotContent (s);
+            s.source     = SlotSource::StyleLoop;
+            s.styleName  = style;
+            s.fileSource = pick;
+            s.role       = want;                        // identité de rôle conservée
+
+            Record rec = recordFromFile (pick);
+            s.sampleKey = rec.key;
+            s.tonal.store (roleIsTonal (rec.role));     // pitch seulement si le fichier est tonal
+            String sub = style + " \xC2\xB7 " + (rec.bpm > 0 ? String (rec.bpm) + " BPM" : String ("boucle"));
+            if (rec.key.hasRoot()) sub += String::fromUTF8 (" \xC2\xB7 ") + KeyParser::toString (rec.key);
+            s.displayName = pick.getFileNameWithoutExtension();
+            s.displaySub  = sub;
+            s.rendering.store (true);
+
+            toRender.push_back (i);
+        }
+    }
+
+    for (int i : toRender) { recomputeSlotTuning (i); requestRender (i); }
+    if (onSlotsChanged) onSlotsChanged();
+    return ! toRender.empty();
+}
+
 void MementoEngine::removeSlot (int index)
 {
     {

@@ -241,7 +241,7 @@ MementoAudioProcessorEditor::MementoAudioProcessorEditor (MementoAudioProcessor&
     titleLabel.setColour (Label::textColourId, kInk);
     addAndMakeVisible (titleLabel);
 
-    subtitleLabel.setText (juce::String::fromUTF8 ("song starter \xC2\xB7 AU \xC2\xB7 v0.3.1"), dontSendNotification);
+    subtitleLabel.setText (juce::String::fromUTF8 ("song starter \xC2\xB7 AU \xC2\xB7 v0.3.2"), dontSendNotification);
     subtitleLabel.setFont (Font (12.5f));
     subtitleLabel.setColour (Label::textColourId, kSub);
     subtitleLabel.setJustificationType (Justification::centredLeft);
@@ -551,9 +551,9 @@ void MementoAudioProcessorEditor::generateRoll()
 {
     auto style = currentStyle();
     if (style.isEmpty()) { setStatus (juce::String::fromUTF8 ("Choisis d'abord un style")); return; }
-    bool ok = processor.getEngine().addRollSlot (style);
-    setStatus (ok ? juce::String::fromUTF8 ("Roll g\xC3\xA9n\xC3\xA9r\xC3\xA9 : ") + style
-                  : juce::String::fromUTF8 ("Maximum 4 pistes \xE2\x80\x94 d\xC3\xA9verrouille ou supprime une piste"));
+    bool ok = processor.getEngine().generateStyleArrangement (style);
+    setStatus (ok ? juce::String::fromUTF8 ("Style g\xC3\xA9n\xC3\xA9r\xC3\xA9 sur toutes les pistes : ") + style
+                  : juce::String::fromUTF8 ("Style vide ou introuvable"));
 }
 
 void MementoAudioProcessorEditor::addStyleLoop()

@@ -85,7 +85,7 @@ private:
     juce::TextButton rerollAllBtn { "Reroll ALL" };
     juce::TextButton exportAllBtn { "EXPORT ALL STEMS" };
     juce::TextButton stylesBtn    { juce::String::fromUTF8 ("STYLES\xE2\x80\xA6") };
-    juce::TextButton genRollBtn   { "GENERATE ROLL" };
+    juce::TextButton genRollBtn   { "GENERATE" };
     juce::TextButton loopStyleBtn { "+ LOOP STYLE" };
     juce::ComboBox   styleCombo;
 

@@ -178,6 +178,10 @@ public:
     void  addSlot (Role role);
     bool  addStyleLoopSlot (const juce::String& style);   // false si 4 pistes verrouillées
     bool  addRollSlot (const juce::String& style);        // false si 4 pistes verrouillées
+    // Génère un arrangement complet : CHAQUE piste non-verrouillée reçoit un
+    // sample de son rôle pris dans le dossier du style (repli : n'importe quel
+    // fichier du style). Toutes les pistes partagent donc le même style.
+    bool  generateStyleArrangement (const juce::String& style);
     void  removeSlot (int index);
 
     void  rerollSlot (int index);
