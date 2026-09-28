@@ -224,6 +224,7 @@ MementoEngine::MementoEngine() : juce::Thread ("Memento Render")
 {
     formatManager.registerBasicFormats();
     startThread(); // thread de rendu de fond
+    loadGlobalFolders(); // recharge le dernier dossier mémorisé + rescan auto
 }
 
 MementoEngine::~MementoEngine()
@@ -364,10 +365,41 @@ void MementoEngine::recomputeAllTuning()
 }
 
 // --- scan bibliothèque -----------------------------------------------------
+// --- réglages globaux (persistants entre instances) ------------------------
+static juce::PropertiesFile::Options mementoPropOptions()
+{
+    juce::PropertiesFile::Options o;
+    o.applicationName     = "Memento";
+    o.filenameSuffix      = "settings";
+    o.folderName          = "Memento";
+    o.osxLibrarySubFolder = "Application Support";
+    return o;
+}
+
+void MementoEngine::saveGlobalFolders() const
+{
+    auto opts = mementoPropOptions();
+    juce::PropertiesFile pf (opts.getDefaultFile(), opts);
+    if (libraryFolder.isDirectory()) pf.setValue ("libraryFolder", libraryFolder.getFullPathName());
+    if (stylesFolder.isDirectory())  pf.setValue ("stylesFolder",  stylesFolder.getFullPathName());
+    pf.saveIfNeeded();
+}
+
+void MementoEngine::loadGlobalFolders()
+{
+    auto opts = mementoPropOptions();
+    juce::PropertiesFile pf (opts.getDefaultFile(), opts);
+    File sty (pf.getValue ("stylesFolder"));
+    File lib (pf.getValue ("libraryFolder"));
+    if (sty.isDirectory()) setStylesFolder (sty);
+    if (lib.isDirectory()) scanFolder (lib);   // rescan auto à l'ouverture
+}
+
 void MementoEngine::scanFolder (const File& folder)
 {
     if (! folder.isDirectory()) return;
     libraryFolder = folder;
+    saveGlobalFolders();                        // mémorise le dossier globalement
     scanning.store (true);
     { const ScopedLock sl (jobLock); pendingScan = folder; }
     jobEvent.signal();
@@ -488,6 +520,7 @@ void MementoEngine::doScan (const File& folder)
 void MementoEngine::setStylesFolder (const File& folder)
 {
     stylesFolder = folder;
+    saveGlobalFolders();                        // mémorise le dossier styles globalement
     pendingStyleRescan.store (true);
     jobEvent.signal();
 }
@@ -901,10 +934,16 @@ void MementoEngine::renderSlot (int slotIndex)
         clip = makeRollClip (fsrc, seed);
     }
 
-    // Accordage : pitch-shift granulaire (préserve la durée → BPM inchangé),
-    // uniquement pour les slots tonals qui demandent un décalage.
-    if (clip != nullptr && tonal && (semis != 0 || cents != 0))
-        pitchShiftBuffer (clip->buffer, (double) semis + (double) cents / 100.0);
+    // Pitch granulaire pour les slots TONALS seulement : compensation du warp
+    // (garde la boucle dans sa hauteur d'origine malgré le time-stretch) + accordage
+    // KEY vers la tonalité cible. Les slots non-tonals (batterie/perc) sont juste
+    // calés au tempo (ré-échantillonnage) sans granulaire → transitoires nettes.
+    if (clip != nullptr && tonal)
+    {
+        double total = clip->warpSemis + (double) semis + (double) cents / 100.0;
+        if (std::abs (total) > 0.01)
+            pitchShiftBuffer (clip->buffer, total);
+    }
 
     // Stocke le clip si le slot pointe toujours la même source.
     {
@@ -955,14 +994,34 @@ std::shared_ptr<StretchedClip> MementoEngine::makeClip (const Record& rec)
     AudioBuffer<float> src ((int) reader->numChannels, (int) frames);
     reader->read (&src, 0, (int) frames, 0, true, true);
 
-    const double srcBpm     = rec.bpm > 0 ? (double) rec.bpm : 0.0;
-    const double bpm        = hostBpm.load();
+    const double bpm         = hostBpm.load();
+    const double srcDurSec   = (double) frames / fileSr;
+
+    // Tempo source : depuis le nom si dispo, sinon ESTIMÉ (auto-warp) en supposant
+    // une boucle d'un nombre entier de mesures 4/4 — on retient l'interprétation
+    // dont le tempo tombe le plus près du tempo hôte (stretch minimal).
+    double srcBpm = rec.bpm > 0 ? (double) rec.bpm : 0.0;
+    int    warpBeats = 0;
+    if (srcBpm <= 0.0 && srcDurSec > 0.05)
+    {
+        double bestErr = 1.0e9;
+        for (int bars : { 1, 2, 4, 8, 16 })
+        {
+            double implied = (double) bars * 4.0 * 60.0 / srcDurSec; // 4 temps / mesure
+            if (implied < 70.0 || implied > 200.0) continue;
+            double err = std::abs (implied - bpm);
+            if (err < bestErr) { bestErr = err; srcBpm = implied; warpBeats = bars * 4; }
+        }
+    }
+
     const double tempoRatio = (srcBpm > 0.0) ? jlimit (0.25, 4.0, bpm / srcBpm) : 1.0;
 
-    // Calage au tempo par ré-échantillonnage : sortie i (SR hôte) ->
-    // position source = i * tempoRatio * fileSr / hostSr.  (KEY et BPM restent
-    // découplés : ici on ne touche qu'au TEMPS ; la hauteur est gérée à part
-    // par pitchShiftBuffer après ce rendu.)
+    // Calage au tempo par ré-échantillonnage (change le TEMPS ET la hauteur d'un
+    // facteur = tempoRatio). On mémorise la compensation de hauteur nécessaire pour
+    // rendre le warp À HAUTEUR PRÉSERVÉE ; elle est appliquée (avec l'accordage KEY)
+    // en une seule passe granulaire dans renderSlot.
+    const double warpSemis = (tempoRatio > 0.0) ? -12.0 * std::log2 (tempoRatio) : 0.0;
+
     const double step = tempoRatio * fileSr / sr;
     const int    srcN = src.getNumSamples();
     const int64  outFrames = (int64) std::floor ((double) (srcN - 1) / jmax (1.0e-6, step));
@@ -988,13 +1047,14 @@ std::shared_ptr<StretchedClip> MementoEngine::makeClip (const Record& rec)
     int64 loopLen = outFrames;
     if (srcBpm > 0.0)
     {
-        double srcDurSec = (double) frames / fileSr;
-        int beats = snapBeats (srcDurSec * srcBpm / 60.0);
+        // nombre de temps de la boucle, calé sur la grille du tempo hôte
+        int beats = (warpBeats > 0) ? warpBeats : snapBeats (srcDurSec * srcBpm / 60.0);
         loopLen = (int64) std::llround ((double) beats * (60.0 / bpm) * sr);
     }
     clip->loopLen   = jlimit ((int64) 64, outFrames, loopLen);
     clip->name      = rec.name;
-    clip->sourceBpm = rec.bpm;
+    clip->sourceBpm = (int) std::llround (srcBpm);
+    clip->warpSemis = warpSemis;
     return clip;
 }
 

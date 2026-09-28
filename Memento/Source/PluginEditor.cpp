@@ -241,7 +241,7 @@ MementoAudioProcessorEditor::MementoAudioProcessorEditor (MementoAudioProcessor&
     titleLabel.setColour (Label::textColourId, kInk);
     addAndMakeVisible (titleLabel);
 
-    subtitleLabel.setText (juce::String::fromUTF8 ("song starter \xC2\xB7 AU \xC2\xB7 v0.3.2"), dontSendNotification);
+    subtitleLabel.setText (juce::String::fromUTF8 ("song starter \xC2\xB7 AU \xC2\xB7 v0.3.3"), dontSendNotification);
     subtitleLabel.setFont (Font (12.5f));
     subtitleLabel.setColour (Label::textColourId, kSub);
     subtitleLabel.setJustificationType (Justification::centredLeft);

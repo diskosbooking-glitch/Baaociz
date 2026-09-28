@@ -91,6 +91,7 @@ struct StretchedClip
     juce::int64              loopLen = 0; // échantillons, calé sur des mesures entières
     juce::String             name;
     int                      sourceBpm = 0;
+    double                   warpSemis = 0.0; // compensation de hauteur pour un warp à hauteur préservée
 };
 
 struct StyleInfo
@@ -243,6 +244,11 @@ private:
     juce::File indexFile() const;
     void loadIndex (std::map<juce::String, Record>& out) const;
     void saveIndex (const std::vector<Record>& recs) const;
+
+    // réglages GLOBAUX (persistants entre instances/sessions) : dernier dossier
+    // bibliothèque + dossier styles mémorisés, rescan auto à l'ouverture.
+    void loadGlobalFolders();
+    void saveGlobalFolders() const;
 
     // --- données ---
     juce::File              libraryFolder;
