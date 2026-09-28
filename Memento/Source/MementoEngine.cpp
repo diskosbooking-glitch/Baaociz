@@ -545,11 +545,44 @@ Array<File> MementoEngine::filesForStyle (const String& style) const
 }
 
 // --- slots -----------------------------------------------------------------
+// Remet à zéro le contenu "source" d'un slot réutilisé (garde le mixage :
+// gain/pan/mute/solo/lock), afin de le recycler proprement pour une nouvelle
+// source sans dépasser la limite de pistes.
+static void resetSlotContent (Slot& s)
+{
+    s.recordIndex = -1;
+    s.fileSource  = juce::File();
+    s.rollSeed    = 0;
+    std::atomic_store (&s.clip, std::shared_ptr<StretchedClip>());
+    s.sampleKey   = Key();
+    s.manualTarget = Key();
+    s.tuneMode.store ((int) TuneMode::Auto);
+    s.semis.store (0);
+    s.cents.store (0);
+    s.rendering.store (false);
+    s.displayName = "\xE2\x80\x94";
+    s.displaySub  = "\xE2\x80\x94";
+}
+
+// slotsLock doit être détenu par l'appelant.
+int MementoEngine::slotForNewSource()
+{
+    if ((int) slots.size() < kMaxSlots)
+    {
+        slots.push_back (std::make_unique<Slot>());
+        return (int) slots.size() - 1;
+    }
+    // Limite atteinte : réutiliser le dernier slot non-verrouillé.
+    for (int i = (int) slots.size() - 1; i >= 0; --i)
+        if (! slots[(size_t) i]->locked.load()) return i;
+    return -1; // tout est verrouillé
+}
+
 void MementoEngine::setDefaultSlots()
 {
     const ScopedLock sl (slotsLock);
     slots.clear();
-    for (Role r : { Role::Drums, Role::Bass, Role::Tonal, Role::Texture, Role::Vox })
+    for (Role r : { Role::Drums, Role::Bass, Role::Tonal, Role::Vox }) // 4 pistes par défaut
     {
         auto s = std::make_unique<Slot>();
         s->role = r;
@@ -564,50 +597,56 @@ void MementoEngine::addSlot (Role role)
     int idx;
     {
         const ScopedLock sl (slotsLock);
-        auto s = std::make_unique<Slot>();
-        s->role = role;
-        s->source = SlotSource::Library;
-        s->tonal.store (roleIsTonal (role));
-        slots.push_back (std::move (s));
-        idx = (int) slots.size() - 1;
+        idx = slotForNewSource();
+        if (idx < 0) return;
+        auto& s = *slots[(size_t) idx];
+        resetSlotContent (s);
+        s.role   = role;
+        s.source = SlotSource::Library;
+        s.styleName = String();
+        s.tonal.store (roleIsTonal (role));
     }
     rerollSlot (idx);
     if (onSlotsChanged) onSlotsChanged();
 }
 
-void MementoEngine::addStyleLoopSlot (const String& style)
+bool MementoEngine::addStyleLoopSlot (const String& style)
 {
     int idx;
     {
         const ScopedLock sl (slotsLock);
-        auto s = std::make_unique<Slot>();
-        s->role = Role::Tonal;
-        s->source = SlotSource::StyleLoop;
-        s->styleName = style;
-        s->displayName = "Boucle \xC2\xB7 " + style;
-        slots.push_back (std::move (s));
-        idx = (int) slots.size() - 1;
+        idx = slotForNewSource();
+        if (idx < 0) return false;
+        auto& s = *slots[(size_t) idx];
+        resetSlotContent (s);
+        s.role   = Role::Tonal;
+        s.source = SlotSource::StyleLoop;
+        s.styleName = style;
+        s.displayName = "Boucle \xC2\xB7 " + style;
     }
     rerollSlot (idx);
     if (onSlotsChanged) onSlotsChanged();
+    return true;
 }
 
-void MementoEngine::addRollSlot (const String& style)
+bool MementoEngine::addRollSlot (const String& style)
 {
     int idx;
     {
         const ScopedLock sl (slotsLock);
-        auto s = std::make_unique<Slot>();
-        s->role = Role::Roll;
-        s->source = SlotSource::Roll;
-        s->styleName = style;
-        s->tonal.store (false); // un roll rythmique n'est jamais pitché
-        s->displayName = "Roll \xC2\xB7 " + style;
-        slots.push_back (std::move (s));
-        idx = (int) slots.size() - 1;
+        idx = slotForNewSource();
+        if (idx < 0) return false;
+        auto& s = *slots[(size_t) idx];
+        resetSlotContent (s);
+        s.role   = Role::Roll;
+        s.source = SlotSource::Roll;
+        s.styleName = style;
+        s.tonal.store (false); // un roll rythmique n'est jamais pitché
+        s.displayName = "Roll \xC2\xB7 " + style;
     }
     rerollSlot (idx);
     if (onSlotsChanged) onSlotsChanged();
+    return true;
 }
 
 void MementoEngine::removeSlot (int index)
@@ -1325,6 +1364,7 @@ void MementoEngine::loadStateString (const String& s)
             sp->tonal.store  (roleIsTonal (sp->role));
             slots.push_back (std::move (sp));
         }
+        if ((int) slots.size() > kMaxSlots) slots.resize (kMaxSlots); // limite 4 pistes
     }
     if (styles.isDirectory()) setStylesFolder (styles);
     if (folder.isDirectory()) scanFolder (folder); // relance scan (rescan auto à l'ouverture) + première combinaison

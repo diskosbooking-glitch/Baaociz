@@ -171,12 +171,13 @@ public:
     TuneMode getSlotTuneMode (int slotIndex) const;
 
     // --- slots ---
+    static constexpr int kMaxSlots = 4;             // nombre de pistes maximum
     int  getNumSlots() const { return (int) slots.size(); }
     Slot* getSlot (int i) { return (i >= 0 && i < (int) slots.size()) ? slots[(size_t) i].get() : nullptr; }
     void  setDefaultSlots();
     void  addSlot (Role role);
-    void  addStyleLoopSlot (const juce::String& style);
-    void  addRollSlot (const juce::String& style);
+    bool  addStyleLoopSlot (const juce::String& style);   // false si 4 pistes verrouillées
+    bool  addRollSlot (const juce::String& style);        // false si 4 pistes verrouillées
     void  removeSlot (int index);
 
     void  rerollSlot (int index);
@@ -209,6 +210,11 @@ private:
 
     std::vector<int> candidatesForRole (Role role) const;
     int  pickForRole (Role role, int avoidIndex) const;
+
+    // Renvoie l'index d'un slot pour une nouvelle source : ajoute si < kMaxSlots,
+    // sinon réutilise le dernier slot non-verrouillé ; -1 si tous verrouillés.
+    // (slotsLock doit être détenu par l'appelant.)
+    int  slotForNewSource();
 
     juce::Array<juce::File> filesForStyle (const juce::String& style) const;
 
