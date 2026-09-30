@@ -34,23 +34,25 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     using namespace juce;
     std::vector<std::unique_ptr<RangedAudioParameter>> p;
 
-    auto pct = [&] (const char* id, const char* name, float def, float lo = 0.0f, float hi = 100.0f)
+    // v = numéro de version du paramètre (1 = v0.x, 2 = ajouté en v1.0) : indispensable
+    // pour que les hôtes AU conservent l'ordre des paramètres entre les versions.
+    auto pct = [&] (const char* id, const char* name, float def, float lo = 0.0f, float hi = 100.0f, int v = 1)
     {
-        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id, 1 }, name,
+        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id, v }, name,
             NormalisableRange<float> (lo, hi, 0.1f), def, AudioParameterFloatAttributes().withLabel ("%")));
     };
-    auto db = [&] (const char* id, const char* name, float def)
+    auto db = [&] (const char* id, const char* name, float def, float lo = -18.0f, float hi = 18.0f, int v = 1)
     {
-        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id, 1 }, name,
-            NormalisableRange<float> (-18.0f, 18.0f, 0.1f), def, AudioParameterFloatAttributes().withLabel ("dB")));
+        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id, v }, name,
+            NormalisableRange<float> (lo, hi, 0.1f), def, AudioParameterFloatAttributes().withLabel ("dB")));
     };
-    auto flag = [&] (const char* id, const char* name, bool def)
+    auto flag = [&] (const char* id, const char* name, bool def, int v = 1)
     {
-        p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id, 1 }, name, def));
+        p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id, v }, name, def));
     };
-    auto choice = [&] (const char* id, const char* name, const StringArray& items, int def)
+    auto choice = [&] (const char* id, const char* name, const StringArray& items, int def, int v = 1)
     {
-        p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id, 1 }, name, items, def));
+        p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id, v }, name, items, def));
     };
 
     // --- Global ---
@@ -105,6 +107,19 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     // --- WIDTH : largeur au-dessus de la coupure ---
     flag ("widthOn", "Width On", false);
     pct ("width", "Width", 100.0f, 0.0f, 200.0f);
+
+    // ------------------------------------------------------------------ v1.0
+    flag ("bypass", "Bypass", false, 2);
+    choice ("pumpSrc", "Pump Source", StringArray { "Sync", "Kick" }, 0, 2);
+    flag ("driveHarm", "Drive Harmonics Only", false, 2);
+    flag ("toneTrack", "Tone Track", false, 2);
+    pct ("squash", "Squash", 0.0f, 0.0f, 100.0f, 2);
+
+    // --- CLIP : écrêteur de sortie suréchantillonné ---
+    flag ("clipOn", "Clip On", false, 2);
+    choice ("clipType", "Clip Type", StringArray { "Soft", "Hard" }, 0, 2);
+    db ("clipPush", "Clip Push", 0.0f, 0.0f, 24.0f, 2);
+    db ("clipCeil", "Clip Ceiling", -1.0f, -18.0f, 0.0f, 2);
 
     return { p.begin(), p.end() };
 }

@@ -4,7 +4,7 @@
 // ============================================================================
 //  Presets usine (valeurs en unités réelles ; booléens 0/1 ; choix = index)
 //  Les paramètres absents reprennent leur valeur par défaut.
-//  KEY, octave et qualité ne sont jamais modifiés par un preset.
+//  KEY, octave, qualité et bypass ne sont jamais modifiés par un preset.
 // ============================================================================
 namespace presets
 {
@@ -50,7 +50,27 @@ inline const std::vector<Factory>& factory()
             { "shapeOn", 1 }, { "attack", -20 }, { "sustain", 20 } } },
         { "Phone Speaker Rescue", "Trap", {
             { "crossover", 140 }, { "toneOn", 1 }, { "toneAmt", 25 }, { "toneHarm", 1 },
-            { "driveOn", 1 }, { "driveType", 1 }, { "drive", 60 }, { "color", 60 }, { "focus", 70 }, { "driveMix", 50 } } },
+            { "driveOn", 1 }, { "driveType", 1 }, { "drive", 60 }, { "color", 60 }, { "focus", 70 }, { "driveMix", 70 },
+            { "driveHarm", 1 } } },
+        { "808 Clip Loud", "Trap", {
+            { "crossover", 130 }, { "driveOn", 1 }, { "driveType", 0 }, { "drive", 30 }, { "focus", 30 }, { "driveMix", 50 },
+            { "shapeOn", 1 }, { "attack", 20 },
+            { "clipOn", 1 }, { "clipType", 1 }, { "clipPush", 6 }, { "clipCeil", -0.5f } } },
+        { "Squashed 808", "Trap", {
+            { "crossover", 120 }, { "driveOn", 1 }, { "driveType", 0 }, { "drive", 35 }, { "color", 20 }, { "driveMix", 60 },
+            { "shapeOn", 1 }, { "squash", 70 }, { "attack", 15 },
+            { "clipOn", 1 }, { "clipType", 0 }, { "clipPush", 2 }, { "clipCeil", -1 } } },
+        { "Glide Tracker", "Trap", {
+            { "crossover", 130 }, { "genOn", 1 }, { "genType", 1 }, { "genLevel", 35 }, { "genTone", 30 },
+            { "toneOn", 1 }, { "toneTrack", 1 }, { "toneAmt", 35 }, { "toneQ", 30 }, { "toneHarm", 1 },
+            { "driveOn", 1 }, { "driveType", 1 }, { "drive", 40 }, { "driveMix", 50 },
+            { "clipOn", 1 }, { "clipPush", 3 }, { "clipCeil", -1 } } },
+        { "UK Drill Slide", "Trap", {
+            { "crossover", 140 }, { "genOn", 1 }, { "genType", 1 }, { "genLevel", 40 }, { "genTone", 40 },
+            { "toneOn", 1 }, { "toneTrack", 1 }, { "toneAmt", 25 },
+            { "driveOn", 1 }, { "driveType", 2 }, { "drive", 45 }, { "focus", 40 }, { "driveMix", 55 },
+            { "shapeOn", 1 }, { "sustain", 20 },
+            { "clipOn", 1 }, { "clipPush", 4 }, { "clipCeil", -1 } } },
 
         // --- Rap / R&B ---
         { "Boom Bap Warm", "Rap & R&B", {
@@ -60,6 +80,9 @@ inline const std::vector<Factory>& factory()
         { "R&B Clean Sub", "Rap & R&B", {
             { "crossover", 100 }, { "genOn", 1 }, { "genType", 1 }, { "genLevel", 60 }, { "genTone", 70 }, { "keyLock", 1 },
             { "driveOn", 1 }, { "driveType", 0 }, { "drive", 15 }, { "driveMix", 40 } } },
+        { "Laptop Harmonics", "Rap & R&B", {
+            { "crossover", 120 }, { "driveOn", 1 }, { "driveType", 1 }, { "drive", 55 }, { "color", 40 }, { "focus", 50 },
+            { "driveMix", 70 }, { "driveHarm", 1 } } },
         { "West Coast Bounce", "Rap & R&B", {
             { "crossover", 120 }, { "genOn", 1 }, { "genType", 1 }, { "genLevel", 40 }, { "genTone", 40 },
             { "toneOn", 1 }, { "toneAmt", 30 }, { "toneHarm", 1 }, { "toneQ", 40 },
@@ -84,6 +107,12 @@ inline const std::vector<Factory>& factory()
             { "crossover", 130 }, { "toneOn", 1 }, { "toneAmt", 45 }, { "toneQ", 60 },
             { "shapeOn", 1 }, { "attack", 35 }, { "sustain", -40 },
             { "pumpOn", 1 }, { "pumpRate", 3 }, { "pumpDepth", 25 }, { "pumpShape", 50 } } },
+        { "Kick Duck", "House", {
+            { "crossover", 120 }, { "pumpOn", 1 }, { "pumpSrc", 1 }, { "pumpDepth", 85 }, { "pumpShape", 35 } } },
+        { "Bass House Clip", "House", {
+            { "crossover", 170 }, { "driveOn", 1 }, { "driveType", 3 }, { "drive", 50 }, { "color", 30 }, { "driveMix", 65 },
+            { "pumpOn", 1 }, { "pumpSrc", 1 }, { "pumpDepth", 70 }, { "pumpShape", 30 },
+            { "clipOn", 1 }, { "clipType", 1 }, { "clipPush", 5 }, { "clipCeil", -0.5f } } },
         { "Garage Wobble Sub", "House", {
             { "crossover", 120 }, { "genOn", 1 }, { "genType", 1 }, { "genLevel", 50 }, { "genTone", 50 },
             { "driveOn", 1 }, { "driveType", 1 }, { "drive", 25 }, { "driveMix", 50 },
@@ -94,6 +123,10 @@ inline const std::vector<Factory>& factory()
             { "crossover", 90 }, { "driveOn", 1 }, { "driveType", 1 }, { "drive", 50 }, { "color", 30 }, { "driveMix", 70 },
             { "shapeOn", 1 }, { "sustain", 40 },
             { "pumpOn", 1 }, { "pumpRate", 2 }, { "pumpDepth", 75 }, { "pumpShape", 55 } } },
+        { "Techno Kick Duck", "Techno", {
+            { "crossover", 100 }, { "driveOn", 1 }, { "driveType", 1 }, { "drive", 40 }, { "color", 25 }, { "driveMix", 60 },
+            { "shapeOn", 1 }, { "sustain", 30 },
+            { "pumpOn", 1 }, { "pumpSrc", 1 }, { "pumpDepth", 90 }, { "pumpShape", 45 } } },
         { "Melodic Techno Sub", "Techno", {
             { "crossover", 110 }, { "genOn", 1 }, { "genType", 1 }, { "genLevel", 50 }, { "genTone", 60 }, { "keyLock", 1 },
             { "pumpOn", 1 }, { "pumpRate", 2 }, { "pumpDepth", 55 }, { "pumpShape", 70 },
@@ -118,13 +151,17 @@ inline const std::vector<Factory>& factory()
         { "Kick Space", "Utility", { { "crossover", 110 }, { "pumpOn", 1 }, { "pumpRate", 2 }, { "pumpDepth", 70 }, { "pumpShape", 25 } } },
         { "Soft Glue", "Utility", { { "crossover", 120 }, { "driveOn", 1 }, { "driveType", 0 }, { "drive", 20 }, { "driveMix", 35 },
                                      { "shapeOn", 1 }, { "sustain", -10 } } },
+        { "Leveler", "Utility", { { "crossover", 120 }, { "shapeOn", 1 }, { "squash", 80 } } },
+        { "Harmonics Only", "Utility", { { "crossover", 120 }, { "driveOn", 1 }, { "driveType", 1 }, { "drive", 50 },
+                                         { "focus", 40 }, { "driveMix", 70 }, { "driveHarm", 1 } } },
+        { "Safety Clip", "Utility", { { "crossover", 120 }, { "clipOn", 1 }, { "clipType", 0 }, { "clipPush", 0 }, { "clipCeil", -1 } } },
     };
     return list;
 }
 
 inline bool isProtected (const juce::String& id)
 {
-    return id == "keyNote" || id == "keyOct" || id == "hq";
+    return id == "keyNote" || id == "keyOct" || id == "hq" || id == "bypass";
 }
 
 inline void apply (juce::AudioProcessorValueTreeState& apvts, const Factory& preset)

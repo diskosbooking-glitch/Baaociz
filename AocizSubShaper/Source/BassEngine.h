@@ -3,8 +3,10 @@
 #include <algorithm>
 
 // ============================================================================
-//  Subshaper — moteur DSP (chaîne cumulable GEN -> TONE -> DRIVE)
-//  Tourne à la fréquence suréchantillonnée.
+//  Subshaper — moteur DSP
+//  Tout tourne à la fréquence suréchantillonnée (x4 en HQ, x2 sinon).
+//  Grave : GEN -> TONE -> DRIVE -> SHAPE (squash + transitoires) -> PUMP
+//  Sortie : CLIP (écrêteur) sur le signal complet.
 // ============================================================================
 namespace subshaper
 {
@@ -32,8 +34,9 @@ struct EnvFollower
     void prepare (double fs, float attMs, float relMs)
     {
         att = (float) std::exp (-1.0 / (fs * attMs * 0.001));
-        rel = (float) std::exp (-1.0 / (fs * relMs * 0.001));
+        setRelease (fs, relMs);
     }
+    void setRelease (double fs, float relMs) { rel = (float) std::exp (-1.0 / (fs * relMs * 0.001)); }
     float process (float x)
     {
         const float a = std::abs (x);
@@ -51,13 +54,31 @@ struct RmsFollower
     void reset() { ms = 0.0f; }
 };
 
+// Coefficient TPT mis en cache (évite un tan() par échantillon quand la fréquence ne bouge pas)
+struct TptCoef
+{
+    float lastHz = -1.0f, g = 0.0f;
+    double lastFs = 0.0;
+    float get (float hz, double fs)
+    {
+        if (hz != lastHz || fs != lastFs)
+        {
+            lastHz = hz;
+            lastFs = fs;
+            g = (float) std::tan (kPi * std::min ((double) hz, fs * 0.45) / fs);
+        }
+        return g;
+    }
+};
+
 // Passe-bande TPT normalisé (gain 1 à la fréquence centrale)
 struct SvfBandpass
 {
     float s1 = 0.0f, s2 = 0.0f;
+    TptCoef coef;
     float process (float x, float hz, float q, double fs)
     {
-        const float g = (float) std::tan (kPi * std::min ((double) hz, fs * 0.45) / fs);
+        const float g = coef.get (hz, fs);
         const float R = 1.0f / (2.0f * q);
         const float h = 1.0f / (1.0f + 2.0f * R * g + g * g);
         const float hp = (x - (2.0f * R + g) * s1 - s2) * h;
@@ -66,6 +87,26 @@ struct SvfBandpass
         const float lp = g * bp + s2;
         s2 = g * bp + lp;
         return bp * 2.0f * R;
+    }
+    void reset() { s1 = s2 = 0.0f; }
+};
+
+// Passe-haut TPT 2e ordre (Butterworth)
+struct SvfHighpass
+{
+    float s1 = 0.0f, s2 = 0.0f;
+    TptCoef coef;
+    float process (float x, float hz, double fs)
+    {
+        const float g = coef.get (hz, fs);
+        constexpr float R = 0.70710678f;
+        const float h = 1.0f / (1.0f + 2.0f * R * g + g * g);
+        const float hp = (x - (2.0f * R + g) * s1 - s2) * h;
+        const float bp = g * hp + s1;
+        s1 = g * hp + bp;
+        const float lp = g * bp + s2;
+        s2 = g * bp + lp;
+        return hp;
     }
     void reset() { s1 = s2 = 0.0f; }
 };
@@ -81,9 +122,11 @@ struct EngineParams
 
     float toneEn = 0.0f, toneAmt = 0.3f, toneQ = 0.3f;
     int   toneHarm = 0;         // 0..3 -> x1..x4
+    bool  toneTrack = false;    // v1.0 : suit la note jouée
 
     float driveEn = 0.0f, drive = 0.35f, color = 0.2f, focus = 0.0f, driveMix = 1.0f;
     int   driveType = 0;        // Tape, Tube, Hard, Fold
+    bool  driveHarm = false;    // v1.0 : harmoniques seules (sub propre)
 };
 
 // ----------------------------------------------------------------------------
@@ -91,7 +134,7 @@ struct ChannelEngine
 {
     double fs = 176400.0;
 
-    // Suivi de hauteur
+    // Suivi de hauteur (toujours actif : GEN et TONE TRACK)
     OnePoleLP trackA, trackB;
     EnvFollower env;
     bool  above = false, flip = false;
@@ -105,6 +148,7 @@ struct ChannelEngine
 
     // Drive
     SvfBandpass focusPre, focusPost;
+    SvfHighpass harmHpA, harmHpB;
     DCBlocker dc;
     RmsFollower rmsIn, rmsOut;
     OnePoleLP gainSmooth;
@@ -130,6 +174,7 @@ struct ChannelEngine
         trackedFreq = 50.0f; phase = 0.0;
         subLpA.reset(); subLpB.reset();
         toneBp.reset(); focusPre.reset(); focusPost.reset();
+        harmHpA.reset(); harmHpB.reset();
         dc.reset(); rmsIn.reset(); rmsOut.reset();
         gainSmooth.z = 1.0f;
     }
@@ -150,11 +195,8 @@ struct ChannelEngine
     }
 
     // --- GEN ---------------------------------------------------------------
-    float processGen (float x, const EngineParams& p)
+    float processGen (float x, bool edge, float e, const EngineParams& p)
     {
-        const bool edge = risingEdge (x);
-        const float e = env.process (x);
-
         if (p.genType == 0) // Octave
         {
             if (edge) flip = ! flip;
@@ -166,12 +208,6 @@ struct ChannelEngine
         }
 
         // Sine
-        if (edge)
-        {
-            const float measured = (float) (fs / std::max (1, lastPeriod));
-            if (measured > 25.0f && measured < 300.0f)
-                trackedFreq += 0.35f * (measured - trackedFreq);
-        }
         const float f = p.keyLock ? p.keyFreq : trackedFreq;
         const float g = gate.process (e > 1.0e-3f ? 1.0f : 0.0f);
         phase += f / fs;
@@ -181,9 +217,11 @@ struct ChannelEngine
     }
 
     // --- TONE --------------------------------------------------------------
+    float toneRoot (const EngineParams& p) const { return p.toneTrack ? trackedFreq : p.keyFreq; }
+
     float processTone (float x, const EngineParams& p)
     {
-        const float hz = p.keyFreq * (float) (p.toneHarm + 1);
+        const float hz = toneRoot (p) * (float) (p.toneHarm + 1);
         const float q  = 1.0f + p.toneQ * 15.0f;
         return x + toneBp.process (x, hz, q, fs) * p.toneAmt * 2.0f;
     }
@@ -228,13 +266,31 @@ struct ChannelEngine
         const float g = std::clamp (ro > 1.0e-6f ? ri / ro : 1.0f, 0.05f, 4.0f);
         y *= gainSmooth.process (g);
 
+        if (p.driveHarm)
+        {
+            // Façon MaxxBass : on ne garde que les harmoniques créées ; la fondamentale
+            // reste propre (plus de présence sur petits haut-parleurs, sans manger de headroom)
+            const float hz = std::max (45.0f, p.keyFreq * 1.5f);
+            const float h = harmHpB.process (harmHpA.process (y, hz, fs), hz, fs);
+            return x + p.driveMix * h;
+        }
         return x + p.driveMix * (y - x);
     }
 
     float process (float x, const EngineParams& p)
     {
+        // Suivi de hauteur
+        const bool edge = risingEdge (x);
+        const float e = env.process (x);
+        if (edge)
+        {
+            const float measured = (float) (fs / std::max (1, lastPeriod));
+            if (measured > 25.0f && measured < 300.0f)
+                trackedFreq += 0.35f * (measured - trackedFreq);
+        }
+
         float y = x;
-        if (p.genEn > 0.0f)   y += p.genEn   * (processGen (y, p)   - y);
+        if (p.genEn > 0.0f)   y += p.genEn   * (processGen (y, edge, e, p) - y);
         if (p.toneEn > 0.0f)  y += p.toneEn  * (processTone (y, p)  - y);
         if (p.driveEn > 0.0f) y += p.driveEn * (processDrive (y, p) - y);
         return y;
@@ -242,11 +298,15 @@ struct ChannelEngine
 };
 
 // ----------------------------------------------------------------------------
-//  SHAPE : transient designer sur le grave (fréquence de base)
+//  SHAPE : squash (nivelage des notes) + transient designer sur le grave
 // ----------------------------------------------------------------------------
-struct TransientShaper
+struct Dynamics
 {
     EnvFollower fast, slow, susShort, susLong;
+    EnvFollower level;
+    float longTerm = 0.0f, longCoef = 0.0f;
+    bool seeded = false;
+    float gain = 1.0f, gainDown = 0.0f, gainUp = 0.0f;
 
     void prepare (double fs)
     {
@@ -254,13 +314,43 @@ struct TransientShaper
         slow.prepare (fs, 20.0f, 40.0f);
         susShort.prepare (fs, 1.0f, 40.0f);
         susLong.prepare (fs, 1.0f, 400.0f);
+        level.prepare (fs, 1.0f, 120.0f);
+        longCoef = (float) std::exp (-1.0 / (fs * 1.2));
+        gainDown = (float) std::exp (-1.0 / (fs * 0.0015));   // réduction rapide (1,5 ms)
+        gainUp   = (float) std::exp (-1.0 / (fs * 0.060));    // remontée lente (60 ms)
         reset();
     }
-    void reset() { fast.reset(); slow.reset(); susShort.reset(); susLong.reset(); }
-
-    // attack / sustain : -1..+1
-    float process (float x, float attack, float sustain)
+    void reset()
     {
+        fast.reset(); slow.reset(); susShort.reset(); susLong.reset(); level.reset();
+        longTerm = 0.0f; seeded = false; gain = 1.0f;
+    }
+
+    // attack / sustain : -1..+1 ; squash : 0..1
+    float process (float x, float attack, float sustain, float squash)
+    {
+        // SQUASH : ramène chaque note vers le niveau moyen (compression montante + descendante)
+        const float e = level.process (x);
+        float gDb = 0.0f;
+        if (e > 1.0e-3f)
+        {
+            // niveau de référence = moyenne quadratique de l'enveloppe (conserve le volume)
+            if (! seeded) { longTerm = e * e; seeded = true; }
+            longTerm = e * e + longCoef * (longTerm - e * e);
+            if (squash > 0.0f)
+            {
+                const float eDb = 20.0f * std::log10 (e);
+                const float diff = 10.0f * std::log10 (longTerm / (e * e));
+                const float upFade = std::clamp ((eDb + 60.0f) / 20.0f, 0.0f, 1.0f);   // pas de remontée du bruit
+                gDb = squash * diff;
+                gDb = gDb > 0.0f ? std::min (gDb, 9.0f) * upFade : std::max (gDb, -12.0f);
+                gDb += squash * 2.5f;   // compensation : le volume moyen reste le même
+            }
+        }
+        const float target = std::pow (10.0f, gDb / 20.0f);
+        gain = target + (target < gain ? gainDown : gainUp) * (gain - target);
+        x *= gain;
+
         const float ef = fast.process (x), es = slow.process (x);
         const float t = ef > 1.0e-6f ? std::max (0.0f, (ef - es) / ef) : 0.0f;
         const float sl = susLong.process (x), ss = susShort.process (x);
@@ -269,4 +359,57 @@ struct TransientShaper
         return x * std::pow (10.0f, dB / 20.0f);
     }
 };
+
+// ----------------------------------------------------------------------------
+//  PUMP en mode KICK : détecteur sur l'entrée sidechain (niveau auto-normalisé)
+//  Renvoie 0..1 (1 = coup de kick en cours)
+// ----------------------------------------------------------------------------
+struct KickDetector
+{
+    OnePoleLP lpA, lpB;
+    EnvFollower env;
+    float peak = 0.0f, peakDecay = 0.0f;
+    double fs = 44100.0;
+    float releaseMs = -1.0f;
+
+    void prepare (double sampleRate)
+    {
+        fs = sampleRate;
+        lpA.setCutoff (160.0f, fs);
+        lpB.setCutoff (160.0f, fs);
+        env.prepare (fs, 0.4f, 150.0f);
+        peakDecay = (float) std::exp (-1.0 / (fs * 2.5));
+        releaseMs = -1.0f;
+        reset();
+    }
+    void reset() { lpA.reset(); lpB.reset(); env.reset(); peak = 0.0f; }
+
+    void setRelease (float ms)
+    {
+        if (ms != releaseMs) { releaseMs = ms; env.setRelease (fs, ms); }
+    }
+
+    float process (float sc)
+    {
+        const float e = env.process (lpB.process (lpA.process (sc)));
+        peak = std::max (e, peak * peakDecay);
+        if (peak < 0.003f) return 0.0f;          // < -50 dBFS : pas de kick
+        return std::clamp (e / peak, 0.0f, 1.0f);
+    }
+};
+
+// ----------------------------------------------------------------------------
+//  CLIP : écrêteur (à utiliser en suréchantillonné)
+// ----------------------------------------------------------------------------
+inline float clipSample (float x, float ceiling, bool hard)
+{
+    if (hard)
+        return std::clamp (x, -ceiling, ceiling);
+    // Genou doux : linéaire jusqu'à -6 dB sous le plafond, puis tangente hyperbolique
+    const float knee = 0.5f * ceiling;
+    const float a = std::abs (x);
+    if (a <= knee) return x;
+    const float y = knee + (ceiling - knee) * std::tanh ((a - knee) / (ceiling - knee));
+    return std::copysign (y, x);
+}
 } // namespace subshaper

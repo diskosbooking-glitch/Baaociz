@@ -121,6 +121,38 @@ private:
 };
 
 // ----------------------------------------------------------------------------
+//  v1.0 : réduction de gain du CLIP
+class ClipMeter : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
+{
+public:
+    explicit ClipMeter (SubShaperProcessor& p) : proc (p) { startTimerHz (30); }
+    ~ClipMeter() override { stopTimer(); }
+    void paint (juce::Graphics&) override;
+
+private:
+    void timerCallback() override;
+    SubShaperProcessor& proc;
+    float shown = 0.0f, hold = 0.0f;
+    int holdFrames = 0;
+};
+
+// ----------------------------------------------------------------------------
+//  v1.0 : pic de sortie maintenu (clic = remise à zéro)
+class PeakView : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
+{
+public:
+    explicit PeakView (SubShaperProcessor& p) : proc (p) { startTimerHz (15); }
+    ~PeakView() override { stopTimer(); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override { proc.outPeak = 0.0f; peak = 0.0f; repaint(); }
+
+private:
+    void timerCallback() override;
+    SubShaperProcessor& proc;
+    float peak = 0.0f;
+};
+
+// ----------------------------------------------------------------------------
 struct LabelledKnob : public juce::Component
 {
     LabelledKnob();
@@ -160,7 +192,7 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    static constexpr int baseW = 1180, baseH = 770;
+    static constexpr int baseW = 1228, baseH = 810;
     std::function<void (float)> onScaleChange;
 
 private:
@@ -178,6 +210,7 @@ private:
     static juce::String moduleForParam (const juce::String& paramId);
 
     void timerCallback() override;
+    void updateLearn();
     void refreshPresetBox();
     void savePresetDialog();
     void stepPreset (int delta);
@@ -192,6 +225,8 @@ private:
     SpectrumView spectrum;
     TunerView tuner;
     MeterView meter;
+    ClipMeter clipMeter;
+    PeakView peakView;
 
     // Barre du haut
     juce::TextButton prevBtn { "<" }, nextBtn { ">" }, saveBtn { "SAVE" },
@@ -204,17 +239,24 @@ private:
     LabelledKnob keyKnob;
     std::unique_ptr<ChoiceSegments> octaveSeg;
     juce::Label keyReadout;
+    juce::TextButton learnBtn { "LEARN" };
+    bool learning = false;
+    int learnTicks = 0;
+    std::array<int, 128> learnHist {};
+    juce::String learnMessage;
+    int learnMessageTicks = 0;
 
     // Modules
-    juce::ToggleButton genOn, toneOn, driveOn, shapeOn, pumpOn, widthOn, keyLockBtn;
-    std::unique_ptr<ChoiceSegments> genTypeSeg, driveTypeSeg, pumpRateSeg;
+    juce::ToggleButton genOn, toneOn, driveOn, shapeOn, pumpOn, widthOn, clipOn, keyLockBtn,
+                       toneTrackBtn, driveHarmBtn;
+    std::unique_ptr<ChoiceSegments> genTypeSeg, driveTypeSeg, pumpRateSeg, pumpSrcSeg, clipTypeSeg;
     LabelledKnob genLevel, genTone, toneAmt, toneQ, toneHarm, drive, color, focus, driveMix,
-                 attack, sustain, pumpDepth, pumpShape, width;
-    juce::Label toneFreqLabel, shapeInfo, pumpInfo, widthInfo;
+                 attack, sustain, squash, pumpDepth, pumpShape, width, clipPush, clipCeil;
+    juce::Label genInfo, toneFreqLabel, shapeInfo, pumpInfo, widthInfo;
 
     // Global
     LabelledKnob inGain, crossover, mix, output;
-    juce::ToggleButton monoLow, soloLow, subCut, delta, gainMatch, hq;
+    juce::ToggleButton monoLow, soloLow, subCut, delta, gainMatch, hq, bypass;
 
     using SliderAtt = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ButtonAtt = juce::AudioProcessorValueTreeState::ButtonAttachment;

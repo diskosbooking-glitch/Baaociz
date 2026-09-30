@@ -213,7 +213,7 @@ void ModularLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& 
         g.setColour (on ? col : (over ? palette::textDim : palette::edge));
         g.drawRoundedRectangle (r, 5.0f, 1.0f);
         g.setColour (on ? palette::ink : juce::Colour (0xffb5b2bf));
-        g.setFont (bold (juce::jmin (12.5f, r.getHeight() * 0.5f)));
+        g.setFont (bold (juce::jmin (12.5f, r.getHeight() * 0.5f, r.getWidth() * 0.42f)));
         g.drawFittedText (b.getButtonText(), r.toNearestInt().reduced (2, 0), juce::Justification::centred, 1);
         return;
     }
@@ -485,6 +485,7 @@ void SpectrumView::drawOverlays (juce::Graphics& g, float w, float h)
         { "shape", palette::butter,   on ("shapeOn") },
         { "pump",  palette::rose,     on ("pumpOn") },
         { "width", palette::mint,     on ("widthOn") },
+        { "clip",  palette::coral,    on ("clipOn") },
     };
 
     auto alphaFor = [this] (const juce::String& id, bool enabled)
@@ -549,7 +550,8 @@ void SpectrumView::drawOverlays (juce::Graphics& g, float w, float h)
         }
         else if (id == "tone")
         {
-            const double f0 = juce::jmin (key * (val ("toneHarm") + 1.0), 18000.0);
+            const double toneRoot = on ("toneTrack") && played > 20.0f ? (double) played : key;
+            const double f0 = juce::jmin (toneRoot * (val ("toneHarm") + 1.0), 18000.0);
             const double q = 1.0 + val ("toneQ") * 0.15;
             const double k = val ("toneAmt") * 0.02;
             curve ([=] (double f)
@@ -565,6 +567,13 @@ void SpectrumView::drawOverlays (juce::Graphics& g, float w, float h)
             if (focus > 0.0)
                 curve ([=] (double f) { return 20.0 * std::log10 (std::abs (1.0 + focus * 2.0 * bandpass (f, root, 2.0)) * lowWeight (f, fc) + (1.0 - lowWeight (f, fc))); },
                        L.col, a * 0.8f, t, false);
+            // HARM ONLY : la fondamentale n'est pas touchée (anneau creux)
+            if (on ("driveHarm"))
+            {
+                const float x0 = xForFreq ((float) root, w);
+                g.setColour (L.col.withAlpha (a));
+                g.drawEllipse (juce::Rectangle<float> (12.0f, 12.0f).withCentre ({ x0, refY }), 1.6f);
+            }
             // Peigne d'harmoniques générées
             g.setColour (L.col.withAlpha (a));
             for (int n = 2; n <= 10; ++n)
@@ -609,7 +618,9 @@ void SpectrumView::drawOverlays (juce::Graphics& g, float w, float h)
         {
             // Cycles de ducking + niveau courant
             const float depth = val ("pumpDepth") * 0.01f;
+            const bool kickMode = val ("pumpSrc") > 0.5f;
             const float release = 0.15f + val ("pumpShape") * 0.01f * 0.75f;
+            const float kickRel = 30.0f * std::pow (20.0f, val ("pumpShape") * 0.01f) / 500.0f;   // en temps (1 = un temps à 120)
             const float x0 = 16.0f, x1 = juce::jmax (x0 + 60.0f, xx - 16.0f);
             const float base = h - 10.0f, height = h * 0.22f;
             juce::Path p;
@@ -617,9 +628,17 @@ void SpectrumView::drawOverlays (juce::Graphics& g, float w, float h)
             for (int i = 0; i <= 200; ++i)
             {
                 const float ph = std::fmod ((float) i / 200.0f * (float) cycles, 1.0f);
-                const float tt = juce::jmin (1.0f, ph / release);
-                const float c = std::sin (tt * juce::MathConstants<float>::halfPi);
-                const float gain = 1.0f - depth * (1.0f - c * c);
+                float gain;
+                if (kickMode)
+                {
+                    gain = 1.0f - depth * std::exp (-ph / juce::jmax (0.02f, kickRel));
+                }
+                else
+                {
+                    const float tt = juce::jmin (1.0f, ph / release);
+                    const float c = std::sin (tt * juce::MathConstants<float>::halfPi);
+                    gain = 1.0f - depth * (1.0f - c * c);
+                }
                 const float x = x0 + (x1 - x0) * (float) i / 200.0f;
                 const float y = base - height * gain;
                 if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
@@ -629,6 +648,44 @@ void SpectrumView::drawOverlays (juce::Graphics& g, float w, float h)
             const float now = proc.pumpGainNow.load();
             auto bar = juce::Rectangle<float> (x1 + 4.0f, base - height * now, 5.0f, height * now);
             g.fillRoundedRectangle (bar, 2.0f);
+        }
+        else if (id == "clip")
+        {
+            const float ceilDb = val ("clipCeil");
+            const float minDb = -90.0f, maxDb = 0.0f;
+            const float y = juce::jmap (juce::jlimit (minDb, maxDb, ceilDb), minDb, maxDb, h - 4.0f, 8.0f);
+            juce::Path line, dashed;
+            line.startNewSubPath (0.0f, y);
+            line.lineTo (w, y);
+            const float dashes[] { 7.0f, 5.0f };
+            juce::PathStrokeType (t).createDashedStroke (dashed, line, dashes, 2);
+            g.setColour (L.col.withAlpha (a));
+            g.fillPath (dashed);
+
+            // Courbe de transfert (entrée -> sortie) dans un petit cadre
+            if (focusId == id && focusAlpha > 0.05f)
+            {
+                const bool hard = val ("clipType") > 0.5f;
+                const float push = juce::Decibels::decibelsToGain (val ("clipPush"));
+                const float ceil = juce::Decibels::decibelsToGain (ceilDb);
+                auto box = juce::Rectangle<float> (w - 96.0f, 48.0f, 84.0f, 84.0f);
+                g.setColour (palette::screen.withAlpha (0.9f * focusAlpha));
+                g.fillRoundedRectangle (box, 6.0f);
+                g.setColour (L.col.withAlpha (0.35f * focusAlpha));
+                g.drawRoundedRectangle (box, 6.0f, 1.0f);
+                g.drawLine (box.getX() + 6.0f, box.getBottom() - 6.0f, box.getRight() - 6.0f, box.getY() + 6.0f, 0.8f);
+                juce::Path tr;
+                for (int i = 0; i <= 60; ++i)
+                {
+                    const float in = -1.5f + 3.0f * (float) i / 60.0f;
+                    const float out = subshaper::clipSample (in * push, ceil, hard);
+                    const float px = box.getX() + 6.0f + (in + 1.5f) / 3.0f * (box.getWidth() - 12.0f);
+                    const float py = box.getCentreY() - juce::jlimit (-1.5f, 1.5f, out) / 1.5f * (box.getHeight() * 0.5f - 6.0f);
+                    if (i == 0) tr.startNewSubPath (px, py); else tr.lineTo (px, py);
+                }
+                g.setColour (L.col.withAlpha (focusAlpha));
+                g.strokePath (tr, juce::PathStrokeType (2.0f));
+            }
         }
         else if (id == "width")
         {
@@ -687,7 +744,7 @@ void SpectrumView::drawOverlays (juce::Graphics& g, float w, float h)
             { "pump", { "PUMP", palette::rose } }, { "width", { "WIDTH", palette::mint } },
             { "crossover", { "CROSSOVER", palette::aqua } }, { "input", { "INPUT", palette::aqua } },
             { "output", { "OUTPUT", palette::aqua } }, { "mix", { "MIX", palette::aqua } },
-            { "key", { "KEY", palette::butter } },
+            { "key", { "KEY", palette::butter } }, { "clip", { "CLIP", palette::coral } },
         };
         auto it = names.find (focusId);
         if (it != names.end())
@@ -695,22 +752,30 @@ void SpectrumView::drawOverlays (juce::Graphics& g, float w, float h)
             juce::String detail;
             if (focusId == "tone")
             {
-                const float f0 = (float) key * (val ("toneHarm") + 1.0f);
-                detail = params::noteNameForFrequency (f0) + "  " + juce::String (f0, 1) + " Hz";
+                const bool track = on ("toneTrack");
+                const float r0 = track && played > 20.0f ? played : (float) key;
+                const float f0 = r0 * (val ("toneHarm") + 1.0f);
+                detail = (track ? juce::String ("TRACK  ") : juce::String()) + params::noteNameForFrequency (f0) + "  " + juce::String (f0, 1) + " Hz";
             }
             else if (focusId == "gen")
                 detail = val ("genType") > 0.5f ? (on ("keyLock") ? "SINE on " + params::noteNameForFrequency ((float) key) : juce::String ("SINE tracking"))
                                                  : "OCTAVE -12";
             else if (focusId == "drive")
-                detail = juce::StringArray { "TAPE", "TUBE", "HARD", "FOLD" }[(int) val ("driveType")] + "  " + juce::String ((int) val ("drive")) + " %";
+                detail = juce::StringArray { "TAPE", "TUBE", "HARD", "FOLD" }[(int) val ("driveType")] + "  " + juce::String ((int) val ("drive")) + " %"
+                         + (on ("driveHarm") ? "  HARM ONLY" : "");
             else if (focusId == "pump")
-                detail = juce::StringArray { "1/1", "1/2", "1/4", "1/8", "1/16" }[(int) val ("pumpRate")] + "  depth " + juce::String ((int) val ("pumpDepth")) + " %";
+                detail = (val ("pumpSrc") > 0.5f ? juce::String ("KICK")
+                                                 : juce::StringArray { "1/1", "1/2", "1/4", "1/8", "1/16" }[(int) val ("pumpRate")])
+                         + "  depth " + juce::String ((int) val ("pumpDepth")) + " %";
             else if (focusId == "crossover") detail = juce::String ((int) fc) + " Hz";
             else if (focusId == "key")       detail = params::noteNameForFrequency ((float) key) + "  " + juce::String (key, 1) + " Hz";
             else if (focusId == "input")     detail = juce::String (val ("inGain"), 1) + " dB";
             else if (focusId == "output")    detail = juce::String (val ("output"), 1) + " dB";
             else if (focusId == "mix")       detail = juce::String ((int) val ("mix")) + " %";
-            else if (focusId == "shape")     detail = "ATT " + juce::String ((int) val ("attack")) + "  SUS " + juce::String ((int) val ("sustain"));
+            else if (focusId == "shape")     detail = "ATT " + juce::String ((int) val ("attack")) + "  SUS " + juce::String ((int) val ("sustain"))
+                                                      + "  SQUASH " + juce::String ((int) val ("squash"));
+            else if (focusId == "clip")      detail = juce::String (val ("clipType") > 0.5f ? "HARD" : "SOFT") + "  push +" + juce::String (val ("clipPush"), 1)
+                                                      + " dB  ceiling " + juce::String (val ("clipCeil"), 1) + " dB";
             else if (focusId == "width")     detail = juce::String ((int) val ("width")) + " %";
 
             const auto text = it->second.first + (detail.isNotEmpty() ? "   " + detail : juce::String());
@@ -893,6 +958,82 @@ void MeterView::paint (juce::Graphics& g)
 }
 
 // ============================================================================
+//  CLIP : réduction de gain
+// ============================================================================
+void ClipMeter::timerCallback()
+{
+    const float r = proc.clipReduction.exchange (0.0f);
+    shown = r > shown ? r : juce::jmax (0.0f, shown - 0.6f);
+    if (r >= hold) { hold = r; holdFrames = 45; }
+    else if (holdFrames > 0 && --holdFrames == 0) hold = 0.0f;
+    repaint();
+}
+
+void ClipMeter::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+    g.setColour (palette::screen);
+    g.fillRoundedRectangle (r, 7.0f);
+    g.setColour (palette::edge);
+    g.drawRoundedRectangle (r.reduced (0.5f), 7.0f, 1.0f);
+
+    auto inner = r.reduced (10.0f, 8.0f);
+    g.setFont (bold (10.5f));
+    g.setColour (palette::textDim);
+    g.drawText ("REDUCTION", inner.removeFromTop (13.0f), juce::Justification::centredLeft);
+
+    const bool active = proc.apvts.getRawParameterValue ("clipOn")->load() > 0.5f;
+    g.setFont (bold (22.0f));
+    g.setColour (active && hold > 0.05f ? palette::coral : palette::textDim);
+    g.drawText (active ? (hold > 0.05f ? "-" + juce::String (hold, 1) + " dB" : juce::String ("0.0 dB")) : juce::String ("OFF"),
+                inner.removeFromTop (28.0f), juce::Justification::centredLeft);
+
+    // Barre 0..12 dB
+    auto bar = inner.withTrimmedTop (4.0f).removeFromTop (10.0f);
+    g.setColour (juce::Colour (0xff2c2b33));
+    g.fillRoundedRectangle (bar, 3.0f);
+    const float frac = juce::jlimit (0.0f, 1.0f, shown / 12.0f);
+    g.setColour (palette::coral);
+    g.fillRoundedRectangle (bar.withWidth (bar.getWidth() * frac), 3.0f);
+    g.setColour (palette::textDim.withAlpha (0.7f));
+    g.setFont (plain (9.5f));
+    auto scale = inner.withTrimmedTop (16.0f).removeFromTop (12.0f);
+    for (int db : { 0, 3, 6, 9, 12 })
+    {
+        const float x = bar.getX() + bar.getWidth() * (float) db / 12.0f;
+        g.drawVerticalLine ((int) x, bar.getBottom(), bar.getBottom() + 3.0f);
+        g.drawText (juce::String (db), juce::Rectangle<float> (18.0f, 11.0f).withCentre ({ x, scale.getCentreY() + 1.0f }),
+                    juce::Justification::centred);
+    }
+}
+
+// ============================================================================
+//  Pic de sortie
+// ============================================================================
+void PeakView::timerCallback()
+{
+    const float p = proc.outPeak.load();
+    if (std::abs (p - peak) > 1.0e-5f) { peak = p; repaint(); }
+}
+
+void PeakView::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (palette::screen);
+    g.fillRoundedRectangle (r, 6.0f);
+    const float db = juce::Decibels::gainToDecibels (peak, -120.0f);
+    const bool over = db > -0.1f;
+    g.setColour (over ? palette::coral : palette::edge);
+    g.drawRoundedRectangle (r, 6.0f, over ? 1.8f : 1.1f);
+    auto inner = r.reduced (12.0f, 0.0f);
+    g.setFont (bold (12.5f));
+    g.setColour (juce::Colour (0xffb5b2bf));
+    g.drawText ("PEAK", inner, juce::Justification::centredLeft);
+    g.setColour (over ? palette::coral : palette::text);
+    g.drawText (peak > 0.0f ? juce::String (db, 1) + " dB" : juce::String ("-inf"), inner, juce::Justification::centredRight);
+}
+
+// ============================================================================
 //  Potard, sélecteur segmenté
 // ============================================================================
 LabelledKnob::LabelledKnob()
@@ -972,7 +1113,7 @@ void ChoiceSegments::resized()
 static const juce::StringArray noteLabels { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
 
 Panel::Panel (SubShaperProcessor& p)
-    : proc (p), spectrum (p), tuner (p), meter (p)
+    : proc (p), spectrum (p), tuner (p), meter (p), clipMeter (p), peakView (p)
 {
     setLookAndFeel (&lnf);
     auto* um = &proc.undoManager;
@@ -981,7 +1122,11 @@ Panel::Panel (SubShaperProcessor& p)
     addAndMakeVisible (spectrum);
     addAndMakeVisible (tuner);
     addAndMakeVisible (meter);
+    addAndMakeVisible (clipMeter);
+    addAndMakeVisible (peakView);
     tuner.setTooltip ("Detects the note played by your bass (monophonic). Green = in tune.");
+    clipMeter.setTooltip ("How much the clipper is shaving off the peaks");
+    peakView.setTooltip ("Highest output peak since reset. Click to reset.");
 
     // --- Barre du haut ---
     for (auto* b : { &prevBtn, &nextBtn, &saveBtn, &slotA, &slotB, &copyBtn, &undoBtn, &redoBtn })
@@ -1022,15 +1167,17 @@ Panel::Panel (SubShaperProcessor& p)
     };
     addAndMakeVisible (presetBox);
 
-    scaleBox.addItem ("100%", 1);
-    scaleBox.addItem ("125%", 2);
-    scaleBox.addItem ("150%", 3);
+    scaleBox.addItem ("75%", 1);
+    scaleBox.addItem ("100%", 2);
+    scaleBox.addItem ("125%", 3);
+    scaleBox.addItem ("150%", 4);
     const float sc = (float) (double) ap.state.getProperty ("uiScale", 1.0);
-    scaleBox.setSelectedId (sc > 1.4f ? 3 : (sc > 1.1f ? 2 : 1), juce::dontSendNotification);
+    scaleBox.setSelectedId (sc > 1.4f ? 4 : (sc > 1.1f ? 3 : (sc > 0.9f ? 2 : 1)), juce::dontSendNotification);
     scaleBox.setTooltip ("Window size");
     scaleBox.onChange = [this]
     {
-        const float s = scaleBox.getSelectedId() == 3 ? 1.5f : (scaleBox.getSelectedId() == 2 ? 1.25f : 1.0f);
+        static const float scales[] { 0.75f, 1.0f, 1.25f, 1.5f };
+        const float s = scales[juce::jlimit (1, 4, scaleBox.getSelectedId()) - 1];
         proc.apvts.state.setProperty ("uiScale", s, nullptr);
         if (onScaleChange) onScaleChange (s);
     };
@@ -1051,6 +1198,22 @@ Panel::Panel (SubShaperProcessor& p)
     keyReadout.setColour (juce::Label::textColourId, palette::butter);
     addAndMakeVisible (keyReadout);
 
+    // LEARN : détecte la tonalité à partir des notes jouées
+    learnBtn.getProperties().set ("segment", true);
+    setAccent (learnBtn, palette::butter);
+    learnBtn.setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    learnBtn.setTooltip ("Play your bass line: Subshaper listens for a few seconds and sets KEY + octave for you");
+    learnBtn.onClick = [this]
+    {
+        learning = ! learning;
+        learnTicks = 0;
+        learnHist.fill (0);
+        learnMessageTicks = 0;
+        learnBtn.setToggleState (learning, juce::dontSendNotification);
+        learnBtn.setButtonText (learning ? "..." : "LEARN");
+    };
+    addAndMakeVisible (learnBtn);
+
     // --- Modules ---
     modules = {
         { "GEN",   palette::sky,      {} },
@@ -1059,6 +1222,7 @@ Panel::Panel (SubShaperProcessor& p)
         { "SHAPE", palette::butter,   {} },
         { "PUMP",  palette::rose,     {} },
         { "WIDTH", palette::mint,     {} },
+        { "CLIP",  palette::coral,    {} },
     };
 
     attachToggle (genOn,   "genOn",   "GEN",   palette::sky,      "Sub generator: adds an octave-down sub or a clean sine");
@@ -1067,7 +1231,8 @@ Panel::Panel (SubShaperProcessor& p)
     attachToggle (shapeOn, "shapeOn", "SHAPE", palette::butter,   "Attack / sustain control of the low end (808 tail)");
     attachToggle (pumpOn,  "pumpOn",  "PUMP",  palette::rose,     "Tempo-synced ducking of the low end (sidechain style)");
     attachToggle (widthOn, "widthOn", "WIDTH", palette::mint,     "Stereo width above the crossover only; sub stays mono");
-    for (auto* t : { &genOn, &toneOn, &driveOn, &shapeOn, &pumpOn, &widthOn })
+    attachToggle (clipOn,  "clipOn",  "CLIP",  palette::coral,    "Oversampled output clipper: loud 808s, controlled peaks");
+    for (auto* t : { &genOn, &toneOn, &driveOn, &shapeOn, &pumpOn, &widthOn, &clipOn })
         t->getProperties().set ("fontSize", 15.0f);
 
     genTypeSeg = std::make_unique<ChoiceSegments> (*ap.getParameter ("genType"), juce::StringArray { "OCTAVE", "SINE" },
@@ -1076,10 +1241,16 @@ Panel::Panel (SubShaperProcessor& p)
                                                      juce::StringArray { "TAPE", "TUBE", "HARD", "FOLD" }, palette::peach, false, um);
     pumpRateSeg = std::make_unique<ChoiceSegments> (*ap.getParameter ("pumpRate"),
                                                     juce::StringArray { "1/1", "1/2", "1/4", "1/8", "1/16" }, palette::rose, false, um);
+    pumpSrcSeg = std::make_unique<ChoiceSegments> (*ap.getParameter ("pumpSrc"), juce::StringArray { "SYNC", "KICK" },
+                                                   palette::rose, false, um);
+    clipTypeSeg = std::make_unique<ChoiceSegments> (*ap.getParameter ("clipType"), juce::StringArray { "SOFT", "HARD" },
+                                                    palette::coral, false, um);
     genTypeSeg->setTooltip ("OCTAVE: sub one octave below. SINE: pure sine following the pitch (or the KEY)");
     driveTypeSeg->setTooltip ("Saturation flavour");
-    pumpRateSeg->setTooltip ("Pump rate, synced to the host tempo");
-    for (auto* s : { genTypeSeg.get(), driveTypeSeg.get(), pumpRateSeg.get() })
+    pumpRateSeg->setTooltip ("Pump rate, synced to the host tempo (SYNC mode)");
+    pumpSrcSeg->setTooltip ("SYNC: ducks on the host tempo. KICK: ducks when the kick on the sidechain input hits");
+    clipTypeSeg->setTooltip ("SOFT: rounded knee, warm. HARD: brick-wall clip, loudest");
+    for (auto* s : { genTypeSeg.get(), driveTypeSeg.get(), pumpRateSeg.get(), pumpSrcSeg.get(), clipTypeSeg.get() })
         addAndMakeVisible (s);
 
     attachKnob (genLevel, "genLevel", "LEVEL", palette::sky, "Level of the generated sub");
@@ -1089,6 +1260,7 @@ Panel::Panel (SubShaperProcessor& p)
     attachKnob (toneAmt, "toneAmt", "AMOUNT", palette::lavender, "Boost amount at the tuned frequency");
     attachKnob (toneQ, "toneQ", "Q", palette::lavender, "Narrowness of the boost");
     attachKnob (toneHarm, "toneHarm", "HARMONIC", palette::lavender, "Which harmonic of the KEY is boosted");
+    attachToggle (toneTrackBtn, "toneTrack", "TRACK", palette::lavender, "Resonance follows the note you play instead of the KEY (bass lines, glides)");
     toneHarm.slider.getProperties().set ("steps", "1x|2x|3x|4x");
     toneHarm.slider.setRotaryParameters (juce::degreesToRadians (240.0f), juce::degreesToRadians (480.0f), true);
     toneHarm.slider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -1097,16 +1269,22 @@ Panel::Panel (SubShaperProcessor& p)
     attachKnob (color, "color", "COLOR", palette::peach, "Asymmetry: adds even harmonics / grit");
     attachKnob (focus, "focus", "FOCUS", palette::peach, "Emphasises the KEY note before saturation so harmonics follow the root");
     attachKnob (driveMix, "driveMix", "MIX", palette::peach, "Parallel blend of the saturation");
+    attachToggle (driveHarmBtn, "driveHarm", "HARM ONLY", palette::peach,
+                  "Adds only the harmonics and keeps the sub clean: heard on phones and laptops without eating headroom");
 
     attachKnob (attack, "attack", "ATTACK", palette::butter, "Punch of the low end (negative = softer)");
     attachKnob (sustain, "sustain", "SUSTAIN", palette::butter, "Tail length of the low end (negative = tighter 808)");
+    attachKnob (squash, "squash", "SQUASH", palette::butter, "Evens out the low end: every 808 note comes out at the same level");
 
     attachKnob (pumpDepth, "pumpDepth", "DEPTH", palette::rose, "How much the low end ducks on each beat");
     attachKnob (pumpShape, "pumpShape", "RELEASE", palette::rose, "How long the low end takes to come back");
 
     attachKnob (width, "width", "WIDTH", palette::mint, "Stereo width above the crossover (100% = unchanged)");
 
-    for (auto* l : { &toneFreqLabel, &shapeInfo, &pumpInfo, &widthInfo })
+    attachKnob (clipPush, "clipPush", "PUSH", palette::coral, "Gain into the clipper: more push = louder and more clipped");
+    attachKnob (clipCeil, "clipCeil", "CEILING", palette::coral, "Maximum output level");
+
+    for (auto* l : { &genInfo, &toneFreqLabel, &shapeInfo, &pumpInfo, &widthInfo })
     {
         l->setJustificationType (juce::Justification::centred);
         l->setFont (plain (11.5f));
@@ -1114,7 +1292,7 @@ Panel::Panel (SubShaperProcessor& p)
         addAndMakeVisible (l);
     }
     toneFreqLabel.setColour (juce::Label::textColourId, palette::lavender);
-    shapeInfo.setText ("Tighten or lengthen\nthe 808 tail", juce::dontSendNotification);
+    shapeInfo.setText ("Squash levels the notes,\nattack / sustain shape them", juce::dontSendNotification);
     widthInfo.setText ("Above crossover only.\nSub stays mono.", juce::dontSendNotification);
 
     // --- Global ---
@@ -1129,30 +1307,35 @@ Panel::Panel (SubShaperProcessor& p)
     attachToggle (delta, "delta", "DELTA", palette::rose, "Listen only to what Subshaper adds or removes");
     attachToggle (gainMatch, "gainMatch", "GAIN MATCH", palette::mint, "Keeps the output as loud as the input for fair comparisons");
     attachToggle (hq, "hq", "HQ (x4)", palette::lavender, "On: 4x oversampling (best). Off: 2x (lower CPU)");
+    attachToggle (bypass, "bypass", "BYPASS", palette::coral, "Bypass Subshaper (latency compensated)");
 
     // Formats d'affichage
     crossover.slider.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " Hz"; };
     for (auto* k : { &inGain, &output })
         k->slider.textFromValueFunction = [] (double v) { return (v > 0 ? "+" : "") + juce::String (v, 1) + " dB"; };
-    for (auto* k : { &genLevel, &genTone, &toneAmt, &toneQ, &drive, &color, &focus, &driveMix, &pumpDepth, &pumpShape, &width, &mix })
+    for (auto* k : { &genLevel, &genTone, &toneAmt, &toneQ, &drive, &color, &focus, &driveMix, &pumpDepth, &pumpShape, &width, &mix, &squash })
         k->slider.textFromValueFunction = [] (double v) { return juce::String ((int) std::round (v)) + " %"; };
+    clipPush.slider.textFromValueFunction = [] (double v) { return "+" + juce::String (v, 1) + " dB"; };
+    clipCeil.slider.textFromValueFunction = [] (double v) { return juce::String (v, 1) + " dB"; };
     for (auto* k : { &attack, &sustain })
         k->slider.textFromValueFunction = [] (double v) { return (v > 0 ? "+" : "") + juce::String ((int) std::round (v)) + " %"; };
     for (auto* k : { &crossover, &inGain, &output, &genLevel, &genTone, &toneAmt, &toneQ, &drive, &color, &focus,
-                     &driveMix, &pumpDepth, &pumpShape, &width, &mix, &attack, &sustain })
+                     &driveMix, &pumpDepth, &pumpShape, &width, &mix, &attack, &sustain, &squash, &clipPush, &clipCeil })
         k->slider.updateText();
 
     // Survol / réglage -> mise en avant sur l'écran
     for (auto* c : std::initializer_list<juce::Component*> { &genOn, genTypeSeg.get(), &genLevel, &genTone, &keyLockBtn })
         registerFocus (*c, "gen");
-    for (auto* c : std::initializer_list<juce::Component*> { &toneOn, &toneAmt, &toneQ, &toneHarm })
+    for (auto* c : std::initializer_list<juce::Component*> { &toneOn, &toneAmt, &toneQ, &toneHarm, &toneTrackBtn })
         registerFocus (*c, "tone");
-    for (auto* c : std::initializer_list<juce::Component*> { &driveOn, driveTypeSeg.get(), &drive, &color, &focus, &driveMix })
+    for (auto* c : std::initializer_list<juce::Component*> { &driveOn, driveTypeSeg.get(), &drive, &color, &focus, &driveMix, &driveHarmBtn })
         registerFocus (*c, "drive");
-    for (auto* c : std::initializer_list<juce::Component*> { &shapeOn, &attack, &sustain })
+    for (auto* c : std::initializer_list<juce::Component*> { &shapeOn, &attack, &sustain, &squash })
         registerFocus (*c, "shape");
-    for (auto* c : std::initializer_list<juce::Component*> { &pumpOn, pumpRateSeg.get(), &pumpDepth, &pumpShape })
+    for (auto* c : std::initializer_list<juce::Component*> { &pumpOn, pumpRateSeg.get(), pumpSrcSeg.get(), &pumpDepth, &pumpShape })
         registerFocus (*c, "pump");
+    for (auto* c : std::initializer_list<juce::Component*> { &clipOn, clipTypeSeg.get(), &clipPush, &clipCeil, &clipMeter })
+        registerFocus (*c, "clip");
     for (auto* c : std::initializer_list<juce::Component*> { &widthOn, &width })
         registerFocus (*c, "width");
     registerFocus (crossover, "crossover");
@@ -1206,6 +1389,8 @@ juce::String Panel::moduleForParam (const juce::String& id)
     if (id == "shapeOn" || id == "attack" || id == "sustain") return "shape";
     if (id.startsWith ("pump")) return "pump";
     if (id.startsWith ("width")) return "width";
+    if (id.startsWith ("clip")) return "clip";
+    if (id == "squash") return "shape";
     if (id == "crossover") return "crossover";
     if (id == "inGain") return "input";
     if (id == "output") return "output";
@@ -1332,36 +1517,127 @@ void Panel::timerCallback()
 
     // KEY
     const float keyHz = proc.getKeyFrequency();
-    keyReadout.setText (params::noteNameForFrequency (keyHz) + "  " + juce::String (keyHz, 1) + " Hz", juce::dontSendNotification);
+    keyReadout.setText (learning ? juce::String ("listening...")
+                                 : learnMessage.isNotEmpty() ? learnMessage
+                                 : params::noteNameForFrequency (keyHz) + "  " + juce::String (keyHz, 1) + " Hz",
+                        juce::dontSendNotification);
     const int harm = (int) proc.apvts.getRawParameterValue ("toneHarm")->load() + 1;
     const float toneHz = keyHz * (float) harm;
     toneFreqLabel.setText (params::noteNameForFrequency (toneHz) + "\n" + juce::String (toneHz, 1) + " Hz", juce::dontSendNotification);
 
     // Libellés dépendant du type GEN
+    auto on = [this] (const char* id) { return proc.apvts.getRawParameterValue (id)->load() > 0.5f; };
     const int gt = (int) proc.apvts.getRawParameterValue ("genType")->load();
     if (gt != lastGenType)
     {
         lastGenType = gt;
         genTone.label.setText (gt == 0 ? "TONE" : "REPLACE", juce::dontSendNotification);
-        keyLockBtn.setEnabled (gt == 1);
-        keyLockBtn.setAlpha (gt == 1 ? 1.0f : 0.4f);
+    }
+    genInfo.setText (gt == 0 ? "Sub one octave\nbelow the bass"
+                             : (on ("keyLock") ? "Sine locked\nto the KEY note" : "Sine follows\nthe played pitch"),
+                     juce::dontSendNotification);
+
+    // PUMP : synchro ou kick
+    const bool kickMode = proc.apvts.getRawParameterValue ("pumpSrc")->load() > 0.5f;
+    if (kickMode)
+    {
+        const bool sc = proc.sidechainActive.load();
+        pumpInfo.setText (sc ? "Kick sidechain\nactive" : "Route your kick to\nthe sidechain input", juce::dontSendNotification);
+        const float k = proc.kickLevel.load();
+        pumpInfo.setColour (juce::Label::textColourId, sc ? palette::textDim.interpolatedWith (palette::rose, k) : palette::peach);
+    }
+    else
+    {
+        pumpInfo.setText (proc.hostHasTempo.load() ? "Synced to host\n" + juce::String (proc.hostBpm.load(), 1) + " BPM"
+                                                   : juce::String ("Free running\n120 BPM"),
+                          juce::dontSendNotification);
+        pumpInfo.setColour (juce::Label::textColourId, palette::textDim);
     }
 
-    const bool playing = proc.hostBpm.load() > 0.0;
-    pumpInfo.setText (playing ? "Synced to host\n" + juce::String (proc.hostBpm.load(), 1) + " BPM" : "Free running", juce::dontSendNotification);
+    // LEARN
+    updateLearn();
 
     // Modules inactifs grisés
-    auto dim = [] (bool on, std::initializer_list<juce::Component*> comps)
+    auto dim = [] (bool isOn, std::initializer_list<juce::Component*> comps)
     {
-        for (auto* c : comps) c->setAlpha (on ? 1.0f : 0.45f);
+        for (auto* c : comps) c->setAlpha (isOn ? 1.0f : 0.45f);
     };
-    auto on = [this] (const char* id) { return proc.apvts.getRawParameterValue (id)->load() > 0.5f; };
-    dim (on ("genOn"),   { genTypeSeg.get(), &genLevel, &genTone });
-    dim (on ("toneOn"),  { &toneAmt, &toneQ, &toneHarm, &toneFreqLabel });
-    dim (on ("driveOn"), { driveTypeSeg.get(), &drive, &color, &focus, &driveMix });
-    dim (on ("shapeOn"), { &attack, &sustain, &shapeInfo });
-    dim (on ("pumpOn"),  { pumpRateSeg.get(), &pumpDepth, &pumpShape, &pumpInfo });
+    dim (on ("genOn"),   { genTypeSeg.get(), &genLevel, &genTone, &genInfo });
+    dim (on ("genOn") && gt == 1, { &keyLockBtn });
+    dim (on ("toneOn"),  { &toneAmt, &toneQ, &toneHarm, &toneFreqLabel, &toneTrackBtn });
+    dim (on ("driveOn"), { driveTypeSeg.get(), &drive, &color, &focus, &driveMix, &driveHarmBtn });
+    dim (on ("shapeOn"), { &attack, &sustain, &squash, &shapeInfo });
+    dim (on ("pumpOn"),  { pumpSrcSeg.get(), &pumpDepth, &pumpShape, &pumpInfo });
+    dim (on ("pumpOn") && ! kickMode, { pumpRateSeg.get() });
     dim (on ("widthOn"), { &width, &widthInfo });
+    dim (on ("clipOn"),  { clipTypeSeg.get(), &clipPush, &clipCeil, &clipMeter });
+    keyLockBtn.setEnabled (gt == 1);
+}
+
+// LEARN : histogramme des notes détectées pendant ~4 s, puis réglage de KEY + octave
+void Panel::updateLearn()
+{
+    if (learnMessageTicks > 0 && --learnMessageTicks == 0)
+        learnMessage.clear();
+
+    if (! learning)
+        return;
+
+    ++learnTicks;
+    learnBtn.setButtonText (juce::String::repeatedString (".", 1 + (learnTicks / 5) % 3));
+
+    const float f = tuner.getFrequency();
+    if (f > 20.0f)
+    {
+        int midi = 0;
+        params::noteNameForFrequency (f, nullptr, &midi);
+        if (juce::isPositiveAndBelow (midi, 128))
+            ++learnHist[(size_t) midi];
+    }
+
+    int best = -1, bestCount = 0, total = 0;
+    for (int m = 0; m < 128; ++m)
+    {
+        total += learnHist[(size_t) m];
+        if (learnHist[(size_t) m] > bestCount) { bestCount = learnHist[(size_t) m]; best = m; }
+    }
+
+    if (learnTicks < 80 && bestCount < 30)   // 4 s max, ou une note bien établie
+        return;
+
+    learning = false;
+    learnBtn.setToggleState (false, juce::dontSendNotification);
+    learnBtn.setButtonText ("LEARN");
+
+    if (best < 0 || bestCount < 4)
+    {
+        learnMessage = "no note heard";
+        learnMessageTicks = 60;
+        return;
+    }
+
+    // Tonalité = classe de note la plus présente ; octave = celle de sa note la plus fréquente
+    std::array<int, 12> classes {};
+    for (int m = 0; m < 128; ++m)
+        classes[(size_t) (m % 12)] += learnHist[(size_t) m];
+    const int note = (int) std::distance (classes.begin(), std::max_element (classes.begin(), classes.end()));
+    int octMidi = best;
+    int octCount = 0;
+    for (int m = note; m < 128; m += 12)
+        if (learnHist[(size_t) m] > octCount) { octCount = learnHist[(size_t) m]; octMidi = m; }
+    const int oct = juce::jlimit (0, 3, octMidi / 12 - 1);
+
+    proc.undoManager.beginNewTransaction();
+    for (auto [id, value] : { std::pair<const char*, float> { "keyNote", (float) note }, { "keyOct", (float) oct } })
+    {
+        auto* prm = proc.apvts.getParameter (id);
+        prm->beginChangeGesture();
+        prm->setValueNotifyingHost (prm->convertTo0to1 (value));
+        prm->endChangeGesture();
+    }
+    learnMessage = "learned " + params::noteNames[note] + juce::String (oct);
+    learnMessageTicks = 60;
+    juce::ignoreUnused (total);
 }
 
 void Panel::drawRail (juce::Graphics& g, juce::Rectangle<float> r)
@@ -1429,17 +1705,17 @@ void Panel::paint (juce::Graphics& g)
                 juce::Rectangle<float> (plate.getX() + 196.0f, plate.getY() + 20.0f, 96.0f, 13.0f), juce::Justification::centredLeft);
 
     // Cartes
-    drawCard (g, { 884.0f, 84.0f, 276.0f, 222.0f }, palette::butter, "KEY");
+    drawCard (g, { 932.0f, 84.0f, 276.0f, 222.0f }, palette::butter, "KEY");
     for (auto& m : modules)
         drawCard (g, m.bounds.toFloat(), m.colour, {});
-    drawCard (g, { 20.0f, 640.0f, 1140.0f, 104.0f }, palette::aqua, "MAIN");
+    drawCard (g, { 20.0f, 680.0f, (float) baseW - 40.0f, 104.0f }, palette::aqua, "MAIN");
 
 }
 
 void Panel::resized()
 {
-    // Barre du haut
-    int x = 470;
+    // Barre du haut (alignée à droite)
+    int x = baseW - 20 - 712;
     auto place = [&x] (juce::Component& c, int w, int gap = 4) { c.setBounds (x, 34, w, 28); x += w + gap; };
     place (prevBtn, 28);
     place (presetBox, 224);
@@ -1453,14 +1729,16 @@ void Panel::resized()
     place (scaleBox, 72);
 
     // Écran + KEY
-    spectrum.setBounds (20, 84, 850, 222);
-    tuner.setBounds (894, 96, 256, 58);
-    keyKnob.setBounds (890, 160, 150, 146);
-    octaveSeg->setBounds (1050, 166, 98, 104);
-    keyReadout.setBounds (1040, 276, 118, 22);
+    spectrum.setBounds (20, 84, 898, 222);
+    const int kx = 932;
+    tuner.setBounds (kx + 10, 96, 196, 58);
+    learnBtn.setBounds (kx + 212, 96, 54, 58);
+    keyKnob.setBounds (kx + 6, 160, 150, 146);
+    octaveSeg->setBounds (kx + 166, 166, 98, 104);
+    keyReadout.setBounds (kx + 152, 276, 122, 22);
 
     // Modules
-    const int cardW = 182, gap = 9, top = 324, cardH = 300;
+    const int cardW = 162, gap = 9, top = 324, cardH = 340;
     for (size_t i = 0; i < modules.size(); ++i)
         modules[i].bounds = { 20 + (int) i * (cardW + gap), top, cardW, cardH };
 
@@ -1473,13 +1751,15 @@ void Panel::resized()
     auto header = [&] (int module) { const auto& b = modules[(size_t) module].bounds; return juce::Rectangle<int> (b.getX() + 10, b.getY() + 14, b.getWidth() - 20, 34); };
     auto selector = [&] (int module) { const auto& b = modules[(size_t) module].bounds; return juce::Rectangle<int> (b.getX() + 10, b.getY() + 56, b.getWidth() - 20, 24); };
     auto fullRow = [&] (int module, int row) { auto c = cell (module, 0, row); return c.withWidth (modules[(size_t) module].bounds.getWidth() - 16); };
+    auto bottom = [&] (int module) { const auto& b = modules[(size_t) module].bounds; return juce::Rectangle<int> (b.getX() + 12, b.getY() + 296, b.getWidth() - 24, 30); };
 
     // GEN
     genOn.setBounds (header (0));
     genTypeSeg->setBounds (selector (0));
     genLevel.setBounds (cell (0, 0, 0));
     genTone.setBounds (cell (0, 1, 0));
-    keyLockBtn.setBounds (fullRow (0, 1).withSizeKeepingCentre (fullRow (0, 1).getWidth() - 8, 32));
+    keyLockBtn.setBounds (fullRow (0, 1).withSizeKeepingCentre (fullRow (0, 1).getWidth() - 8, 32).translated (0, -14));
+    genInfo.setBounds (fullRow (0, 1).translated (0, 64).withHeight (40));
 
     // TONE
     toneOn.setBounds (header (1));
@@ -1487,6 +1767,7 @@ void Panel::resized()
     toneQ.setBounds (cell (1, 1, 0).translated (0, -26));
     toneHarm.setBounds (cell (1, 0, 1).withTrimmedTop (-16).translated (0, 8));
     toneFreqLabel.setBounds (cell (1, 1, 1).translated (0, 4));
+    toneTrackBtn.setBounds (bottom (1));
 
     // DRIVE
     driveOn.setBounds (header (2));
@@ -1495,40 +1776,50 @@ void Panel::resized()
     color.setBounds (cell (2, 1, 0));
     focus.setBounds (cell (2, 0, 1));
     driveMix.setBounds (cell (2, 1, 1));
+    driveHarmBtn.setBounds (bottom (2));
 
     // SHAPE
     shapeOn.setBounds (header (3));
     attack.setBounds (cell (3, 0, 0).translated (0, -26));
     sustain.setBounds (cell (3, 1, 0).translated (0, -26));
-    shapeInfo.setBounds (fullRow (3, 1).translated (0, -10));
+    squash.setBounds (fullRow (3, 1).translated (0, -26).withSizeKeepingCentre (100, 100));
+    shapeInfo.setBounds (fullRow (3, 1).translated (0, 82).withHeight (40));
 
     // PUMP
     pumpOn.setBounds (header (4));
-    pumpRateSeg->setBounds (selector (4));
+    pumpSrcSeg->setBounds (selector (4));
     pumpDepth.setBounds (cell (4, 0, 0));
     pumpShape.setBounds (cell (4, 1, 0));
-    pumpInfo.setBounds (fullRow (4, 1));
+    pumpRateSeg->setBounds (fullRow (4, 1).withHeight (26).translated (4, 8).withWidth (fullRow (4, 1).getWidth() - 8));
+    pumpInfo.setBounds (fullRow (4, 1).translated (0, 44).withHeight (40));
 
     // WIDTH
     widthOn.setBounds (header (5));
     width.setBounds (fullRow (5, 0).translated (0, -26).withSizeKeepingCentre (110, 100));
     widthInfo.setBounds (fullRow (5, 1).translated (0, -10));
 
+    // CLIP
+    clipOn.setBounds (header (6));
+    clipTypeSeg->setBounds (selector (6));
+    clipPush.setBounds (cell (6, 0, 0));
+    clipCeil.setBounds (cell (6, 1, 0));
+    clipMeter.setBounds (fullRow (6, 1).withSizeKeepingCentre (fullRow (6, 1).getWidth() - 8, 84).translated (0, 6));
+
     // Global
     const int kw = 92;
     int gx = 34;
     for (auto* k : { &inGain, &crossover, &mix, &output })
     {
-        k->setBounds (gx, 650, kw, 90);
+        k->setBounds (gx, 690, kw, 90);
         gx += kw + 6;
     }
-    meter.setBounds (428, 652, 30, 84);
-    const int tw = 150, th = 34;
+    meter.setBounds (428, 692, 30, 84);
+    const int tw = 170, th = 34;
     int col = 0;
-    for (auto* t : { &monoLow, &soloLow, &subCut, &delta, &gainMatch, &hq })
+    for (auto* t : std::initializer_list<juce::Component*> { &monoLow, &soloLow, &subCut, &bypass, &delta, &gainMatch, &hq, &peakView })
     {
-        const int r = col / 3, c = col % 3;
-        t->setBounds (482 + c * (tw + 10), 654 + r * (th + 10), tw, th);
+        const int r = col / 4, c = col % 4;
+        t->setBounds (482 + c * (tw + 10), 694 + r * (th + 10), tw, th);
         ++col;
     }
 }
@@ -1548,7 +1839,7 @@ SubShaperEditor::~SubShaperEditor() = default;
 
 void SubShaperEditor::applyScale (float s)
 {
-    scale = juce::jlimit (1.0f, 1.5f, s);
+    scale = juce::jlimit (0.75f, 1.5f, s);
     panel.setTransform (juce::AffineTransform::scale (scale));
     setSize (juce::roundToInt (Panel::baseW * scale), juce::roundToInt (Panel::baseH * scale));
 }
