@@ -1,20 +1,41 @@
-name: Compilation Subshaper
+name: Build Subshaper (macOS)
 
 on:
   push:
+    paths:
+      - 'AocizSubShaper/**'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   macos:
-    name: Mac (AU + VST3)
-    runs-on: macos-latest
+    name: Mac (AU + VST3) -> .dmg
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compilation + installateur
+      - name: Compilation + auval + .dmg
         run: bash AocizSubShaper/ci/build_mac.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: Subshaper-Mac
-          path: AocizSubShaper/out/*.pkg
+          path: AocizSubShaper/out/
+          if-no-files-found: error
+
+      - name: Release (lien de telechargement direct)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(sed -n 's/^project(Subshaper VERSION \([0-9.]*\)).*/\1/p' AocizSubShaper/CMakeLists.txt)"
+          TAG="subshaper-v${VERSION}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" AocizSubShaper/out/* --clobber
+          else
+            gh release create "$TAG" AocizSubShaper/out/* --target "$GITHUB_SHA" \
+              --title "Subshaper ${VERSION}" \
+              --notes "Build automatique AU + VST3. Ouvrir le .dmg puis double-clic sur l'installateur .pkg (ou glisser les plugins sur leurs raccourcis)."
+          fi
