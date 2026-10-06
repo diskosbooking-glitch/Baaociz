@@ -47,6 +47,7 @@ struct Settings
     float wetTrimDb = 0.0f, outputDb = 0.0f;
     bool delta = false, bypass = false;
     bool listen = false;         // écoute de la zone d'une bande (delta filtré)
+    float focus = 0.0f;          // -1 = tout sur L/M, +1 = tout sur R/S
 };
 
 class Engine
@@ -57,7 +58,7 @@ public:
     static constexpr int maxTracked = 6;
 
     // --------------------------------------------------------------- setup
-    void prepare (double sampleRate, int initialQuality)
+    void prepare (double sampleRate, int initialQuality, int initialTimeQuality = 0)
     {
         sr = sampleRate;
         scale = sr <= 50000.0 ? 1 : (sr <= 100000.0 ? 2 : 4);
@@ -119,15 +120,18 @@ public:
         for (auto* s : { &wetTrimSm, &outputSm, &mixSm, &bypassSm, &deltaSm, &listenSm })
             s->reset (sr, 0.03);
 
-        setQuality (initialQuality);
+        setQuality (initialQuality, initialTimeQuality);
     }
 
-    // Change la résolution sans allocation (remet l'état à zéro)
-    void setQuality (int q)
+    // Résolution (taille FFT = latence) et qualité temporelle (pas entre trames :
+    // Normal 5,3 ms, High 2,7 ms, Ultra 1,3 ms à 48 kHz — la latence ne change pas).
+    // Sans allocation ; remet l'état à zéro.
+    void setQuality (int q, int tq)
     {
         quality = juce::jlimit (0, numQualities - 1, q);
+        timeQuality = juce::jlimit (0, 2, tq);
         N = (1024 << quality) * scale;
-        hop = 256 * scale;
+        hop = (256 >> timeQuality) * scale;
         bins = N / 2 + 1;
         fft = ffts[(size_t) quality].get();
         binHz = (float) (sr / N);
@@ -173,6 +177,7 @@ public:
     int getNumBins() const noexcept   { return bins; }
     float getBinHz() const noexcept   { return binHz; }
     int getQuality() const noexcept   { return quality; }
+    int getTimeQuality() const noexcept { return timeQuality; }
 
     // Multiplicateur de profondeur par case (éditeur de bandes), canal de traitement c
     float* getWeights (int c) noexcept { return weight[c].data(); }
@@ -511,10 +516,13 @@ private:
             const float* own = pathT[c].data();
             const float* lk = pathT[2].data();
             const float* wgt = weight[c].data();
+            // FOCUS stéréo : répartit la quantité de traitement entre L/M et R/S
+            const float fz = juce::jlimit (-1.0f, 1.0f, settings.focus);
+            const float fm = nc < 2 ? 1.0f : (c == 0 ? std::min (1.0f, 1.0f - fz) : std::min (1.0f, 1.0f + fz));
             for (int k = 0; k < bins; ++k)
             {
                 const float v = link >= 0.999f ? lk[k] : (link <= 0.001f ? own[k] : own[k] + link * (lk[k] - own[k]));
-                tmpA[(size_t) k] = std::min (settings.maxCutDb, v * wgt[k]);
+                tmpA[(size_t) k] = std::min (settings.maxCutDb, v * wgt[k] * fm);
             }
             // coupes lissées en fréquence (2 passes = forme en cloche)
             boxAverage (tmpA.data(), tmpB.data(), maskLo, maskHi);
@@ -554,7 +562,9 @@ private:
         firstFrame = false;
         peakReductionDb.store (peak);
         overallReductionDb.store (eIn > 1.0e-12 ? (float) (10.0 * std::log10 (eIn / std::max (1.0e-30, eOut))) : 0.0f);
-        publishUi (nc);
+        // écran : ~100 images/s suffisent, même en qualité Ultra
+        publishTimer += frameSeconds;
+        if (publishTimer >= 0.0099f) { publishTimer = 0.0f; publishUi (nc); }
     }
 
     void publishUi (int nc)
@@ -616,7 +626,7 @@ private:
 
     // ----------------------------------------------------------------- état
     double sr = 44100.0;
-    int scale = 1, quality = 1, N = 2048, hop = 256, bins = 1025, nMax = 4096;
+    int scale = 1, quality = 1, timeQuality = 0, N = 2048, hop = 256, bins = 1025, nMax = 4096;
     float binHz = 21.5f, frameSeconds = 0.0058f, olaGain = 1.0f, fsNorm = 0.0f, levelNorm = 0.0f, slowCoef = 0.97f;
     std::array<std::unique_ptr<juce::dsp::FFT>, numQualities> ffts;
     juce::dsp::FFT* fft = nullptr;
@@ -634,6 +644,7 @@ private:
     std::vector<float> window, linkPower;
 
     int ringPos = 0, hopCount = 0, dryPos = 0, procCh = 2;
+    float publishTimer = 1.0f;
     bool useSc = false, msActive = false, firstFrame = true;
     bool tablesValid = false;
     float tDetail = -1, tDetailTilt = 0, tAttack = 0, tRelease = 0, tAttackTilt = 0, tReleaseTilt = 0;

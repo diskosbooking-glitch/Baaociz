@@ -15,6 +15,7 @@ enum BandFocus { focusAll = 0, focusLeft, focusRight, focusMid, focusSide };
 inline const juce::StringArray bandTypeNames  { "Bell", "Low Shelf", "High Shelf", "Low Cut", "High Cut", "Band Pass", "Tilt", "Band Reject" };
 inline const juce::StringArray bandFocusNames { "All", "Left", "Right", "Mid", "Side" };
 inline const juce::StringArray qualityNames   { "Low Latency", "Normal", "High Res" };
+inline const juce::StringArray timeQualityNames { "Normal", "High", "Ultra" };
 
 inline juce::String bandId (int band, const char* what) { return "b" + juce::String (band + 1) + "_" + what; }
 
@@ -62,13 +63,13 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         if (toText) attr = attr.withStringFromValueFunction (toText);
         p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id, v }, name, r, def, attr));
     };
-    auto flag = [&] (const String& id, const String& name, bool def)
+    auto flag = [&] (const String& id, const String& name, bool def, int v = 1)
     {
-        p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id, 1 }, name, def));
+        p.push_back (std::make_unique<AudioParameterBool> (ParameterID { id, v }, name, def));
     };
-    auto choice = [&] (const String& id, const String& name, const StringArray& items, int def)
+    auto choice = [&] (const String& id, const String& name, const StringArray& items, int def, int v = 1)
     {
-        p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id, 1 }, name, items, def));
+        p.push_back (std::make_unique<AudioParameterChoice> (ParameterID { id, v }, name, items, def));
     };
     auto oneDec = [] (float v, int) { return String (v, 1); };
     auto ms = [] (float v, int) { return v < 10.0f ? String (v, 1) : String (roundToInt (v)); };
@@ -118,6 +119,14 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 
     // ------------------------------------------------------------------ v0.2
     fl ("releaseTilt", "Release Tilt", NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%", signedPct, 2);
+
+    // ------------------------------------------------------------------ v0.3
+    for (int b = 0; b < numBands; ++b)
+        flag (bandId (b, "byp"), "Band " + String (b + 1) + " Bypass", false, 3);
+    choice ("timeQuality", "Quality", timeQualityNames, 0, 3);
+    flag ("renderUltra", "Render in Ultra", true, 3);
+    fl ("focus", "Stereo Focus", NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%",
+        [] (float v, int) { const int i = roundToInt (v); return i == 0 ? String ("C") : (i < 0 ? "L/M " + String (-i) : "R/S " + String (i)); }, 3);
 
     return { p.begin(), p.end() };
 }

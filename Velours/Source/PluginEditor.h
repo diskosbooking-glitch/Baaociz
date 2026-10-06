@@ -5,58 +5,59 @@
 #include "PluginProcessor.h"
 
 // ----------------------------------------------------------------------------
-//  Palette pastel (famille Aociz : Subshaper, Skygrin…)
+//  Velours v0.3 — interface sobre : gris profond, un seul accent « velours »,
+//  typographie Inter, grand graphe de réduction au centre.
 // ----------------------------------------------------------------------------
-namespace palette
+namespace ui
 {
-    const juce::Colour panelTop    { 0xff2d2c33 };
-    const juce::Colour panelBottom { 0xff232228 };
-    const juce::Colour card        { 0xff1e1d23 };
-    const juce::Colour screen      { 0xff141318 };
-    const juce::Colour edge        { 0xff403e48 };
-    const juce::Colour grid        { 0xff24232b };
-    const juce::Colour textDim     { 0xff8f8c99 };
-    const juce::Colour text        { 0xfff1eff5 };
-    const juce::Colour ink         { 0xff1c1b21 };
+    const juce::Colour window   { 0xff16171a };
+    const juce::Colour panel    { 0xff1d1e22 };
+    const juce::Colour raised   { 0xff26272c };
+    const juce::Colour raisedHi { 0xff2e2f35 };
+    const juce::Colour line     { 0xff313238 };
+    const juce::Colour graphBg  { 0xff111215 };
+    const juce::Colour grid     { 0xff1f2024 };
+    const juce::Colour text     { 0xffecebe8 };
+    const juce::Colour dim      { 0xff8e8d94 };
+    const juce::Colour faint    { 0xff5b5b62 };
+    const juce::Colour accent   { 0xffe8687e };   // velours (rose profond)
+    const juce::Colour ink      { 0xff141518 };
 
-    const juce::Colour sky      { 0xffa7cff2 };
-    const juce::Colour lavender { 0xffc0b0f2 };
-    const juce::Colour peach    { 0xffffc2a1 };
-    const juce::Colour butter   { 0xfff0e0a0 };
-    const juce::Colour rose     { 0xfff2abc8 };
-    const juce::Colour mint     { 0xffa3e3c6 };
-    const juce::Colour aqua     { 0xff9fd9df };
-    const juce::Colour coral    { 0xfff5a9a0 };
-
-    inline juce::Colour band (int i)
-    {
-        static const juce::Colour c[] = { sky, peach, mint, lavender, butter, rose, aqua, coral };
-        return c[(size_t) ((i % 8 + 8) % 8)];
-    }
+    juce::Font regular (float size);
+    juce::Font semi (float size);
+    juce::Font caps (float size);   // semi-gras, espacé (titres)
 }
 
-void setAccent (juce::Component&, juce::Colour);
-juce::Colour getAccent (const juce::Component&, juce::Colour fallback = palette::sky);
-
 // ----------------------------------------------------------------------------
-class ModularLookAndFeel : public juce::LookAndFeel_V4
+class VeloursLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
-    ModularLookAndFeel();
+    VeloursLookAndFeel();
+    juce::Typeface::Ptr getTypefaceForFont (const juce::Font&) override;
+
     void drawRotarySlider (juce::Graphics&, int x, int y, int w, int h, float pos,
                            float startAngle, float endAngle, juce::Slider&) override;
+    void drawLinearSlider (juce::Graphics&, int x, int y, int w, int h, float pos, float minPos, float maxPos,
+                           juce::Slider::SliderStyle, juce::Slider&) override;
+    juce::Label* createSliderTextBox (juce::Slider&) override;
     void drawButtonBackground (juce::Graphics&, juce::Button&, const juce::Colour&, bool, bool) override;
-    void drawButtonText (juce::Graphics&, juce::TextButton&, bool, bool) override {}
+    void drawButtonText (juce::Graphics&, juce::TextButton&, bool, bool) override;
     void drawToggleButton (juce::Graphics&, juce::ToggleButton&, bool, bool) override;
     void drawComboBox (juce::Graphics&, int w, int h, bool down, int bx, int by, int bw, int bh, juce::ComboBox&) override;
     void positionComboBoxText (juce::ComboBox&, juce::Label&) override;
     juce::Font getComboBoxFont (juce::ComboBox&) override;
     juce::Font getPopupMenuFont() override;
     juce::Font getLabelFont (juce::Label&) override;
+    void drawPopupMenuBackground (juce::Graphics&, int w, int h) override;
+    void drawTooltip (juce::Graphics&, const juce::String&, int w, int h) override;
+    juce::Rectangle<int> getTooltipBounds (const juce::String&, juce::Point<int>, juce::Rectangle<int>) override;
+
+private:
+    juce::Typeface::Ptr interRegular, interSemi;
 };
 
 // ----------------------------------------------------------------------------
-//  Écran central : analyseur, courbe de réduction et éditeur de bandes
+//  Graphe de réduction + courbe de profondeur (éditeur de bandes)
 // ----------------------------------------------------------------------------
 class SpectrumDisplay : public juce::Component, private juce::Timer
 {
@@ -75,7 +76,9 @@ public:
     void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
-    void selectBand (int b) { selected = b; repaint(); }
+    int getSelected() const { return selected; }
+    void selectBand (int b) { selected = b; if (onSelectionChange) onSelectionChange (b); repaint(); }
+    std::function<void (int)> onSelectionChange;
 
 private:
     void timerCallback() override;
@@ -89,7 +92,7 @@ private:
 
     juce::Point<float> nodePos (int band) const;
     int hitBand (juce::Point<float>) const;
-    static bool usesGain (int type) { return type != params::lowCut && type != params::highCut; }
+    static bool usesGain (int type) { return type != params::lowCut && type != params::highCut && type != params::bandReject; }
 
     juce::RangedAudioParameter* bandParam (int band, const char* what) const;
     void setBandValue (int band, const char* what, float value, bool gesture = true);
@@ -97,79 +100,112 @@ private:
     void showBandMenu (int band);
     void showAddMenu (juce::Point<float>);
     void rebuildCurves();
+    void updateTracks (const float* hz, const float* db, int n);
+    void drawTracking (juce::Graphics&);
 
     VeloursProcessor& proc;
     std::array<bands::Band, params::numBands> bandsNow {};
     int curveChannels = 0;
     bool curveMS = false;
 
-    std::vector<float> colIn, colOut, colRed;     // par colonne de pixel (lissées)
-    std::vector<int> colLo, colHi;                // cases FFT couvertes par chaque colonne
-    std::vector<float> scratchIn, scratchOut, scratchRed;
+    std::vector<float> colIn, colRed, colHold;    // par colonne de pixel (lissées)
+    std::vector<int> colLo, colHi;
+    std::vector<float> scratchIn, scratchRed;
     int mappedBins = -1;
     float mappedBinHz = 0.0f;
     int lastCounter = -1;
 
-    std::vector<float> sensCurve[2];               // dB de sensibilité par colonne, par canal
+    std::vector<float> sensCurve[2];
     bool curvesDiffer = false;
 
-    // Résonances suivies (lissées d'une image à l'autre)
     struct Track { float hz = 1000.0f, db = 0.0f, life = 0.0f; };
     std::array<Track, 8> tracks {};
-    void updateTracks (const float* hz, const float* db, int n);
-    void drawTracking (juce::Graphics&);
 
-    // Traînées : les dernières courbes de réduction, pour voir le suivi bouger
-    static constexpr int numTrails = 8;
-    std::array<std::vector<float>, numTrails> trails;
-    int trailPos = 0, trailTick = 0;
     float maxCutDb = 30.0f;
-
     int selected = -1, dragging = -1, hover = -1;
     juce::Point<float> hoverPos;
     bool showHover = false;
-
     juce::Rectangle<float> plot;
 };
 
 // ----------------------------------------------------------------------------
-class LabelledKnob : public juce::Component
+class Knob : public juce::Component
 {
 public:
-    LabelledKnob();
-    void attach (juce::AudioProcessorValueTreeState&, const juce::String& id, const juce::String& text,
-                 juce::Colour c, const juce::String& tip, bool big = false);
+    enum class Size { big, medium, small };
+    Knob();
+    void attach (VeloursProcessor&, const juce::String& id, const juce::String& text, Size, const juce::String& tip,
+                 bool useAccent = false);
     void resized() override;
+    void paint (juce::Graphics&) override;
 
     juce::Slider slider;
-    juce::Label label;
+private:
+    juce::String title;
+    Size size = Size::medium;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
 };
 
-class ChoiceSegments : public juce::Component
+class HSlider : public juce::Component
 {
 public:
-    ChoiceSegments (juce::RangedAudioParameter&, const juce::StringArray& labels, juce::Colour accent);
+    HSlider();
+    void attach (VeloursProcessor&, const juce::String& id, const juce::String& text, const juce::String& tip);
     void resized() override;
-    void setTip (const juce::String& t) { for (auto* b : buttons) b->setTooltip (t); }
+    void paint (juce::Graphics&) override;
+    juce::Slider slider;
+private:
+    juce::String title;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
+};
 
+class Segments : public juce::Component
+{
+public:
+    Segments (juce::RangedAudioParameter&, const juce::StringArray& labels, juce::UndoManager*);
+    void resized() override;
+    void paint (juce::Graphics&) override;
+    void setTip (const juce::String& t) { for (auto* b : buttons) b->setTooltip (t); }
 private:
     juce::OwnedArray<juce::TextButton> buttons;
     std::unique_ptr<juce::ParameterAttachment> attachment;
 };
 
-class ReductionMeter : public juce::Component, private juce::Timer
+class LevelReadout : public juce::Component, private juce::Timer
 {
 public:
-    explicit ReductionMeter (VeloursProcessor& p) : proc (p) { startTimerHz (30); }
-    ~ReductionMeter() override { stopTimer(); }
+    explicit LevelReadout (VeloursProcessor& p) : proc (p) { startTimerHz (20); }
+    ~LevelReadout() override { stopTimer(); }
     void paint (juce::Graphics&) override;
-
 private:
     void timerCallback() override;
     VeloursProcessor& proc;
-    float overall = 0.0f, peak = 0.0f, peakHold = 0.0f;
-    int holdFrames = 0;
+    float overall = 0.0f, peak = 0.0f;
+};
+
+// ----------------------------------------------------------------------------
+//  Barre de la bande sélectionnée (comme soothe3) : on/off, écoute, forme,
+//  fréquence, profondeur, Q, focus, suppression
+// ----------------------------------------------------------------------------
+class BandStrip : public juce::Component
+{
+public:
+    explicit BandStrip (VeloursProcessor&);
+    ~BandStrip() override;
+    void setBand (int band);
+    std::function<void()> onDelete;
+    void resized() override;
+    void paint (juce::Graphics&) override;
+
+private:
+    VeloursProcessor& proc;
+    int band = -1;
+    juce::TextButton power { "ON" }, listen { "LISTEN" }, remove { "X" };
+    juce::ComboBox shape, focus;
+    juce::Slider freq, gain, q;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> freqAtt, gainAtt, qAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> shapeAtt, focusAtt;
+    std::unique_ptr<juce::ParameterAttachment> bypAtt;
 };
 
 // ----------------------------------------------------------------------------
@@ -177,7 +213,7 @@ class Panel : public juce::Component, private juce::Timer
 {
 public:
     static constexpr int baseW = 1100;
-    static constexpr int baseH = 720;
+    static constexpr int baseH = 680;
 
     explicit Panel (VeloursProcessor&);
     ~Panel() override;
@@ -190,29 +226,33 @@ private:
     void timerCallback() override;
     void refreshPresetBox();
     void stepPreset (int step);
-    void attachToggle (juce::ToggleButton&, const juce::String& id, const juce::String& text, juce::Colour, const juce::String& tip);
-    void drawRail (juce::Graphics&, juce::Rectangle<float>);
-    void drawCard (juce::Graphics&, juce::Rectangle<float>, juce::Colour, const juce::String& tab);
+    void savePresetDialog();
+    void attachToggle (juce::ToggleButton&, const juce::String& id, const juce::String& text, const juce::String& tip);
+    void sectionTitle (juce::Graphics&, juce::Rectangle<int>, const juce::String&);
 
     VeloursProcessor& proc;
-    ModularLookAndFeel lnf;
+    VeloursLookAndFeel lnf;
 
     SpectrumDisplay display;
+    BandStrip strip;
 
-    LabelledKnob depth, detail, detailTilt, attack, release, timeTilt, releaseTilt, maxCut, link, mix, wetTrim, output;
-    std::unique_ptr<ChoiceSegments> modeSeg, stereoSeg;
-    juce::ToggleButton sidechain, delta, bypass, bandListen;
+    Knob depth, detail, attack, release;
+    Knob detailTilt, attackTilt, releaseTilt, maxCut, wetTrim, link, focus;
+    HSlider mix, output;
+    std::unique_ptr<Segments> modeSeg, stereoSeg;
+    juce::ToggleButton sidechain, delta, bypass, renderUltra;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> buttonAttachments;
-    ReductionMeter meter;
+    LevelReadout level;
     juce::Label scInfo;
 
-    juce::TextButton prevBtn { "<" }, nextBtn { ">" };
-    juce::ComboBox presetBox, qualityBox, scaleBox;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> qualityAttachment;
+    juce::TextButton prevBtn { "<" }, nextBtn { ">" }, saveBtn { "SAVE" },
+                     slotA { "A" }, slotB { "B" }, copyBtn { "A>B" }, undoBtn { "UNDO" }, redoBtn { "REDO" };
+    juce::ComboBox presetBox, resolutionBox, qualityBox, scaleBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> resolutionAtt, qualityAtt;
     juce::String shownPreset;
+    juce::Array<juce::File> userFiles;
 
-    struct Card { juce::Rectangle<int> bounds; juce::Colour colour; juce::String tab; };
-    std::vector<Card> cards;
+    juce::Rectangle<int> leftArea, rightArea, footerArea, topArea;
 };
 
 // ----------------------------------------------------------------------------
@@ -227,6 +267,6 @@ private:
     void applyScale (float);
     VeloursProcessor& proc;
     Panel panel;
-    juce::TooltipWindow tooltips { this, 600 };
+    juce::TooltipWindow tooltips { this, 700 };
     float scale = 1.0f;
 };

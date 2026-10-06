@@ -78,4 +78,29 @@ inline const std::vector<Preset>& factory()
     };
     return list;
 }
+// Paramètres que les presets ne touchent pas
+inline bool isProtected (const juce::String& id)
+{
+    return id == "bypass" || id == "quality" || id == "timeQuality" || id == "renderUltra";
+}
+
+inline juce::File userFolder()
+{
+   #if JUCE_MAC
+    auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                   .getChildFile ("Application Support/Velours/Presets");
+   #else
+    auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                   .getChildFile ("Velours/Presets");
+   #endif
+    dir.createDirectory();
+    return dir;
+}
+
+inline juce::Array<juce::File> userPresets()
+{
+    auto files = userFolder().findChildFiles (juce::File::findFiles, false, "*.velours");
+    files.sort();
+    return files;
+}
 } // namespace presets

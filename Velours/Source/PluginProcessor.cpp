@@ -6,7 +6,7 @@ VeloursProcessor::VeloursProcessor()
                           .withInput  ("Input",     juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output",    juce::AudioChannelSet::stereo(), true)
                           .withInput  ("Sidechain", juce::AudioChannelSet::stereo(), false)),
-      apvts (*this, nullptr, "VELOURS", params::createLayout())
+      apvts (*this, &undoManager, "VELOURS", params::createLayout())
 {
     bypassParam = dynamic_cast<juce::AudioParameterBool*> (apvts.getParameter ("bypass"));
 
@@ -20,6 +20,9 @@ VeloursProcessor::VeloursProcessor()
     pDelta = raw ("delta");         pBypass = raw ("bypass");
     pQuality = raw ("quality");
     pReleaseTilt = raw ("releaseTilt");
+    pTimeQuality = raw ("timeQuality");
+    pRenderUltra = raw ("renderUltra");
+    pFocus = raw ("focus");
 
     for (int b = 0; b < params::numBands; ++b)
     {
@@ -30,6 +33,7 @@ VeloursProcessor::VeloursProcessor()
         r.gain  = apvts.getRawParameterValue (params::bandId (b, "gain"));
         r.q     = apvts.getRawParameterValue (params::bandId (b, "q"));
         r.focus = apvts.getRawParameterValue (params::bandId (b, "focus"));
+        r.byp   = apvts.getRawParameterValue (params::bandId (b, "byp"));
     }
     apvts.state.setProperty ("presetName", "Init", nullptr);
 }
@@ -52,7 +56,8 @@ bool VeloursProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 void VeloursProcessor::prepareToPlay (double sampleRate, int)
 {
     currentRate = sampleRate;
-    engine.prepare (sampleRate, juce::roundToInt (pQuality->load()));
+    const int tq = (pRenderUltra->load() > 0.5f && isNonRealtime()) ? 2 : juce::roundToInt (pTimeQuality->load());
+    engine.prepare (sampleRate, juce::roundToInt (pQuality->load()), tq);
     setLatencySamples (engine.getLatency());
     lastWeightBins = -1;
     updateWeights (juce::jmax (1, getMainBusNumInputChannels()), pStereo->load() > 0.5f, true);
@@ -71,6 +76,7 @@ std::array<bands::Band, params::numBands> VeloursProcessor::readBands() const
         d.gain  = r.gain->load();
         d.q     = r.q->load();
         d.focus = juce::roundToInt (r.focus->load());
+        d.bypass = r.byp->load() > 0.5f;
     }
     return out;
 }
@@ -97,7 +103,7 @@ void VeloursProcessor::updateWeights (int numChannels, bool midSide, bool force)
     std::array<float, gridN> g0 {}, g1 {};
     for (const auto& b : bandsNow)
     {
-        if (! b.on) continue;
+        if (! b.on || b.bypass) continue;
         const bool to0 = bands::appliesTo (b, 0, numChannels, midSide);
         const bool to1 = bands::appliesTo (b, 1, numChannels, midSide);
         for (int i = 0; i < gridN; ++i)
@@ -147,6 +153,7 @@ velours::Settings VeloursProcessor::readSettings() const
     s.detailTilt = pDetailTilt->load() * 0.01f;
     s.attackTilt  = pTimeTilt->load() * 0.01f;
     s.releaseTilt = pReleaseTilt->load() * 0.01f;
+    s.focus       = pFocus->load() * 0.01f;
     s.midSide    = pStereo->load() > 0.5f;
     s.link       = pLink->load() * 0.01f;
     s.sidechain  = pSidechain->load() > 0.5f;
@@ -168,10 +175,13 @@ void VeloursProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     if (n == 0 || mainIn == 0) return;
 
     // Résolution (change la latence)
+    // Résolution (change la latence) et qualité temporelle (ne la change pas).
+    // Rendu hors-ligne : qualité Ultra automatique, comme soothe3.
     const int q = juce::roundToInt (pQuality->load());
-    if (q != engine.getQuality())
+    const int tq = (pRenderUltra->load() > 0.5f && isNonRealtime()) ? 2 : juce::roundToInt (pTimeQuality->load());
+    if (q != engine.getQuality() || tq != engine.getTimeQuality())
     {
-        engine.setQuality (q);
+        engine.setQuality (q, tq);
         setLatencySamples (engine.getLatency());
     }
 
@@ -212,6 +222,7 @@ void VeloursProcessor::loadFactoryPreset (int index)
     if (! juce::isPositiveAndBelow (index, (int) list.size())) return;
     const auto& p = list[(size_t) index];
     currentProgram = index;
+    undoManager.beginNewTransaction();
 
     auto set = [this] (const juce::String& id, float v)
     {
@@ -231,6 +242,7 @@ void VeloursProcessor::loadFactoryPreset (int index)
     set ("stereo", (float) p.stereo); set ("link", p.link);
     set ("mix", p.mix);           set ("wetTrim", 0.0f);
     set ("delta", 0.0f);
+    set ("focus", 0.0f);
 
     for (int b = 0; b < params::numBands; ++b)
     {
@@ -244,8 +256,65 @@ void VeloursProcessor::loadFactoryPreset (int index)
         set (params::bandId (b, "gain"), gain);
         set (params::bandId (b, "q"), qv);
         set (params::bandId (b, "focus"), (float) focus);
+        set (params::bandId (b, "byp"), 0.0f);
     }
     apvts.state.setProperty ("presetName", p.name, nullptr);
+}
+
+// ---------------------------------------------------------------- presets utilisateur
+bool VeloursProcessor::saveUserPreset (const juce::String& name)
+{
+    const auto clean = juce::File::createLegalFileName (name.trim());
+    if (clean.isEmpty()) return false;
+    apvts.state.setProperty ("presetName", clean, nullptr);
+    auto state = apvts.copyState();
+    for (auto* key : { "uiScale", "program", "bandListen", "version" }) state.removeProperty (key, nullptr);
+    if (auto xml = state.createXml())
+        return xml->writeTo (presets::userFolder().getChildFile (clean + ".velours"));
+    return false;
+}
+
+void VeloursProcessor::applyStateValues (const juce::ValueTree& tree)
+{
+    for (auto* prm : getParameters())
+    {
+        auto* rp = dynamic_cast<juce::RangedAudioParameter*> (prm);
+        if (rp == nullptr || presets::isProtected (rp->getParameterID())) continue;
+        auto child = tree.getChildWithProperty ("id", rp->getParameterID());
+        // paramètre absent (preset d'une ancienne version) : valeur par défaut
+        const float norm = child.isValid() ? rp->convertTo0to1 ((float) child.getProperty ("value")) : rp->getDefaultValue();
+        rp->beginChangeGesture();
+        rp->setValueNotifyingHost (norm);
+        rp->endChangeGesture();
+    }
+}
+
+bool VeloursProcessor::loadUserPreset (const juce::File& file)
+{
+    auto xml = juce::XmlDocument::parse (file);
+    if (xml == nullptr || ! xml->hasTagName (apvts.state.getType())) return false;
+    undoManager.beginNewTransaction();
+    applyStateValues (juce::ValueTree::fromXml (*xml));
+    apvts.state.setProperty ("presetName", file.getFileNameWithoutExtension(), nullptr);
+    return true;
+}
+
+// ---------------------------------------------------------------- A/B
+void VeloursProcessor::selectSlot (int slot)
+{
+    slot = juce::jlimit (0, 1, slot);
+    if (slot == activeSlot) return;
+    slots[activeSlot] = apvts.copyState();
+    if (! slots[slot].isValid()) slots[slot] = apvts.copyState();
+    undoManager.beginNewTransaction();
+    applyStateValues (slots[slot]);
+    apvts.state.setProperty ("presetName", slots[slot].getProperty ("presetName", "Init"), nullptr);
+    activeSlot = slot;
+}
+
+void VeloursProcessor::copyToOtherSlot()
+{
+    slots[1 - activeSlot] = apvts.copyState();
 }
 
 // ---------------------------------------------------------------- état
@@ -277,6 +346,7 @@ void VeloursProcessor::setStateInformation (const void* data, int sizeInBytes)
                     if (! juce::exactlyEqual (static_cast<juce::AudioProcessorParameter*> (bp)->getValue(), snapped))
                         bp->setValueNotifyingHost (snapped);
                 }
+            undoManager.clearUndoHistory();
         }
 }
 

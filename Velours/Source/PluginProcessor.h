@@ -43,6 +43,17 @@ public:
     void loadFactoryPreset (int index);
     juce::String getPresetName() const { return apvts.state.getProperty ("presetName", "Init").toString(); }
 
+    // --- Presets utilisateur (~/Library/Application Support/Velours/Presets) ---
+    bool saveUserPreset (const juce::String& name);
+    bool loadUserPreset (const juce::File& file);
+
+    // --- A/B ---
+    void selectSlot (int slot);
+    void copyToOtherSlot();
+    int getActiveSlot() const { return activeSlot; }
+
+    juce::UndoManager undoManager;
+
     // Bandes courantes (lecture interface)
     std::array<bands::Band, params::numBands> readBands() const;
 
@@ -70,13 +81,17 @@ private:
 
     juce::AudioParameterBool* bypassParam = nullptr;
     int currentProgram = 0;
+    juce::ValueTree slots[2];
+    int activeSlot = 0;
+    void applyStateValues (const juce::ValueTree& tree);
 
     struct BandParams { std::atomic<float>* on; std::atomic<float>* type; std::atomic<float>* freq;
-                        std::atomic<float>* gain; std::atomic<float>* q; std::atomic<float>* focus; };
+                        std::atomic<float>* gain; std::atomic<float>* q; std::atomic<float>* focus; std::atomic<float>* byp; };
     std::array<BandParams, params::numBands> bandRaw {};
     std::atomic<float>* raw (const char* id) const { return apvts.getRawParameterValue (id); }
     std::atomic<float> *pDepth, *pDetail, *pAttack, *pRelease, *pMaxCut, *pMode, *pDetailTilt, *pTimeTilt,
-                       *pStereo, *pLink, *pSidechain, *pMix, *pWetTrim, *pOutput, *pDelta, *pBypass, *pQuality, *pReleaseTilt;
+                       *pStereo, *pLink, *pSidechain, *pMix, *pWetTrim, *pOutput, *pDelta, *pBypass, *pQuality, *pReleaseTilt,
+                       *pTimeQuality, *pRenderUltra, *pFocus;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VeloursProcessor)
 };

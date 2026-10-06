@@ -14,13 +14,14 @@ namespace bands
 struct Band
 {
     bool on = false;
+    bool bypass = false;      // bande présente mais sans effet (double-clic sur le nœud)
     int type = params::bell;
     float freq = 1000.0f, gain = 0.0f, q = 1.0f;
     int focus = params::focusAll;
 
     bool operator== (const Band& o) const
     {
-        return on == o.on && type == o.type && juce::exactlyEqual (freq, o.freq) && juce::exactlyEqual (gain, o.gain)
+        return on == o.on && bypass == o.bypass && type == o.type && juce::exactlyEqual (freq, o.freq) && juce::exactlyEqual (gain, o.gain)
             && juce::exactlyEqual (q, o.q) && focus == o.focus;
     }
     bool operator!= (const Band& o) const { return ! (*this == o); }
@@ -115,7 +116,7 @@ inline float totalDb (const Band* all, int n, float f, int channel, int numChann
 {
     float db = 0.0f;
     for (int i = 0; i < n; ++i)
-        if (all[i].on && appliesTo (all[i], channel, numChannels, midSide))
+        if (all[i].on && ! all[i].bypass && appliesTo (all[i], channel, numChannels, midSide))
             db += responseDb (all[i], f);
     return db;
 }
