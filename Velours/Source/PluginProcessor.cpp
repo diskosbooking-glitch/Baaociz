@@ -19,6 +19,7 @@ VeloursProcessor::VeloursProcessor()
     pWetTrim = raw ("wetTrim");     pOutput = raw ("output");
     pDelta = raw ("delta");         pBypass = raw ("bypass");
     pQuality = raw ("quality");
+    pReleaseTilt = raw ("releaseTilt");
 
     for (int b = 0; b < params::numBands; ++b)
     {
@@ -120,6 +121,20 @@ void VeloursProcessor::updateWeights (int numChannels, bool midSide, bool force)
     }
 }
 
+void VeloursProcessor::updateListenMask (int band)
+{
+    const auto b = readBands()[(size_t) band];
+    const int bins = engine.getNumBins();
+    if (band == lastListenBand && b == lastListen && bins == lastListenBins) return;
+    lastListenBand = band;
+    lastListen = b;
+    lastListenBins = bins;
+    float* m = engine.getListenMask();
+    const float binHz = engine.getBinHz();
+    for (int k = 0; k < bins; ++k)
+        m[k] = juce::jlimit (0.0f, 1.0f, bands::listenRegion (b, juce::jmax (1.0f, (float) k * binHz)));
+}
+
 velours::Settings VeloursProcessor::readSettings() const
 {
     velours::Settings s;
@@ -130,7 +145,8 @@ velours::Settings VeloursProcessor::readSettings() const
     s.maxCutDb   = pMaxCut->load();
     s.hard       = pMode->load() > 0.5f;
     s.detailTilt = pDetailTilt->load() * 0.01f;
-    s.timeTilt   = pTimeTilt->load() * 0.01f;
+    s.attackTilt  = pTimeTilt->load() * 0.01f;
+    s.releaseTilt = pReleaseTilt->load() * 0.01f;
     s.midSide    = pStereo->load() > 0.5f;
     s.link       = pLink->load() * 0.01f;
     s.sidechain  = pSidechain->load() > 0.5f;
@@ -159,8 +175,17 @@ void VeloursProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         setLatencySamples (engine.getLatency());
     }
 
-    const auto s = readSettings();
+    auto s = readSettings();
     updateWeights (numCh, s.midSide, false);
+
+    // BAND LISTEN : zone de la bande en cours de réglage
+    const int lb = listenBand.load();
+    const auto bandsNow = readBands();
+    if (juce::isPositiveAndBelow (lb, params::numBands) && bandsNow[(size_t) lb].on)
+    {
+        updateListenMask (lb);
+        s.listen = true;
+    }
     processChannels = numCh;
 
     // Sidechain
@@ -201,7 +226,8 @@ void VeloursProcessor::loadFactoryPreset (int index)
     set ("depth", p.depth);       set ("detail", p.detail);
     set ("attack", p.attack);     set ("release", p.release);
     set ("maxcut", p.maxCut);     set ("mode", (float) p.mode);
-    set ("detailTilt", p.detailTilt); set ("timeTilt", p.timeTilt);
+    set ("detailTilt", p.detailTilt); set ("timeTilt", p.attackTilt);
+    set ("releaseTilt", p.releaseTilt);
     set ("stereo", (float) p.stereo); set ("link", p.link);
     set ("mix", p.mix);           set ("wetTrim", 0.0f);
     set ("delta", 0.0f);
@@ -228,6 +254,7 @@ void VeloursProcessor::getStateInformation (juce::MemoryBlock& destData)
     auto state = apvts.copyState();
     state.setProperty ("version", JucePlugin_VersionString, nullptr);
     state.setProperty ("program", currentProgram, nullptr);
+    state.setProperty ("bandListen", bandListenOnDrag.load(), nullptr);
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
@@ -239,6 +266,7 @@ void VeloursProcessor::setStateInformation (const void* data, int sizeInBytes)
         {
             auto tree = juce::ValueTree::fromXml (*xml);
             currentProgram = (int) tree.getProperty ("program", 0);
+            bandListenOnDrag = (bool) tree.getProperty ("bandListen", false);
             apvts.replaceState (tree);
 
             // Interrupteurs : valeur normalisée exacte (0 ou 1) après restauration

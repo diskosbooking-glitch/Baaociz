@@ -4,23 +4,29 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <algorithm>
 
 // ============================================================================
-//  Velours — moteur de suppression dynamique des résonances
+//  Velours — moteur de suppression dynamique des résonances (v0.2)
 //
-//  Principe (même famille que soothe) :
-//   1. STFT (fenêtre de Hann, recouvrement 4x à 16x, trame toutes les ~5 ms) ;
+//  Principe (même famille que soothe3) :
+//   1. STFT (fenêtre de Hann, recouvrement 4x à 16x, une trame toutes les ~5 ms) ;
 //   2. spectre de détection lissé à la résolution choisie par DETAIL
-//      (fin = chirurgical, large = doux) ;
-//   3. enveloppe spectrale de référence (lissage large, robuste aux pics) ;
-//   4. ce qui dépasse l'enveloppe = résonance -> atténuation proportionnelle
-//      à DEPTH, pondérée par l'éditeur de bandes, plafonnée par MAX CUT ;
-//   5. lissage de la courbe de gain en fréquence puis attaque / relâchement
-//      par case de fréquence (avec TILT : temps et détail varient selon la
-//      fréquence) ;
-//   6. mode HARD : réagit aussi aux montées soudaines (comportement de
-//      compresseur), mode SOFT : uniquement la forme du spectre.
+//      (fin = coupes étroites et profondes, large = réduction des accumulations),
+//      puis lissé dans le temps (plus lent en détail élevé, comme soothe3) ;
+//   3. seuil adaptatif (mode SOFT) : on relie les sommets du spectre et on en
+//      tire une enveloppe de référence robuste. Ce qui dépasse ses voisins est
+//      une résonance ; le traitement ne dépend pas du niveau d'entrée ;
+//   4. mode HARD : dépend du niveau absolu (seuil fixe), réagit en plus aux
+//      montées soudaines -> plus ferme, proche d'un compresseur multibande ;
+//   5. atténuation = excès x DEPTH, pondérée par la courbe de profondeur
+//      (éditeur de bandes), plafonnée par MAX CUT, lissée en fréquence ;
+//   6. attaque / relâchement par case de fréquence, naturellement plus rapides
+//      dans l'aigu, modulés par ATTACK TILT et RELEASE TILT ;
+//   7. suivi des résonances : les creux les plus marqués sont publiés pour
+//      l'écran (fréquence, profondeur) à chaque trame ;
+//   8. BAND LISTEN : on n'entend que ce qui est retiré dans la zone d'une bande.
 // ============================================================================
 namespace velours
 {
@@ -32,13 +38,15 @@ struct Settings
     float maxCutDb = 30.0f;
     bool hard = false;
     float detailTilt = 0.0f;     // -1..1
-    float timeTilt = 0.0f;       // -1..1
+    float attackTilt = 0.0f;     // -1..1
+    float releaseTilt = 0.0f;    // -1..1
     bool midSide = false;
     float link = 1.0f;           // 0..1
     bool sidechain = false;
     float mix = 1.0f;            // 0..1
     float wetTrimDb = 0.0f, outputDb = 0.0f;
     bool delta = false, bypass = false;
+    bool listen = false;         // écoute de la zone d'une bande (delta filtré)
 };
 
 class Engine
@@ -46,6 +54,7 @@ class Engine
 public:
     static constexpr int maxChannels = 2;
     static constexpr int numQualities = 3;
+    static constexpr int maxTracked = 6;
 
     // --------------------------------------------------------------- setup
     void prepare (double sampleRate, int initialQuality)
@@ -77,6 +86,7 @@ public:
         {
             fineDb[p].assign ((size_t) binsMax, -200.0f);
             slowDb[p].assign ((size_t) binsMax, -200.0f);
+            detPow[p].assign ((size_t) binsMax, 0.0f);
             pathT[p].assign ((size_t) binsMax, 0.0f);
         }
         tmpA.assign ((size_t) binsMax, 0.0f);
@@ -89,14 +99,24 @@ public:
         thrDb.assign ((size_t) binsMax, 0.0f);
         coefAtt.assign ((size_t) binsMax, 0.0f);
         coefRel.assign ((size_t) binsMax, 0.0f);
+        coefDetUp.assign ((size_t) binsMax, 0.0f);
+        coefDetDown.assign ((size_t) binsMax, 0.0f);
+        pinkDb.assign ((size_t) binsMax, 0.0f);
+        listenMask.assign ((size_t) binsMax, 0.0f);
         window.assign ((size_t) nMax, 0.0f);
         linkPower.assign ((size_t) binsMax, 0.0f);
 
-        ui.inDb.assign ((size_t) binsMax, -200.0f);
-        ui.outDb.assign ((size_t) binsMax, -200.0f);
-        ui.redDb.assign ((size_t) binsMax, 0.0f);
+        {
+            // l'écran lit ces tableaux sur un autre fil : jamais de réallocation hors verrou
+            const juce::SpinLock::ScopedLockType sl (ui.lock);
+            ui.bins = 0;
+            ui.numTracked = 0;
+            ui.inDb.assign ((size_t) binsMax, -200.0f);
+            ui.outDb.assign ((size_t) binsMax, -200.0f);
+            ui.redDb.assign ((size_t) binsMax, 0.0f);
+        }
 
-        for (auto* s : { &wetTrimSm, &outputSm, &mixSm, &bypassSm, &deltaSm })
+        for (auto* s : { &wetTrimSm, &outputSm, &mixSm, &bypassSm, &deltaSm, &listenSm })
             s->reset (sr, 0.03);
 
         setQuality (initialQuality);
@@ -116,8 +136,12 @@ public:
         for (int i = 0; i < N; ++i)
             window[(size_t) i] = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) N);
         const float overlap = (float) N / (float) hop;
-        olaGain = 8.0f / (3.0f * overlap);   // somme des Hann² = 3R/8
-        fsNorm = 20.0f * std::log10 ((float) N / 4.0f);   // sinus pleine échelle -> 0 dB
+        olaGain = 8.0f / (3.0f * overlap);                 // somme des Hann² = 3R/8
+        fsNorm = 20.0f * std::log10 ((float) N / 4.0f);    // sinus pleine échelle -> 0 dB
+        levelNorm = 5.0f * std::log10 ((float) N / 2048.0f); // niveau comparable d'une résolution à l'autre
+
+        for (int k = 0; k < bins; ++k)
+            pinkDb[(size_t) k] = 3.0f * std::log2 (std::max (20.0f, (float) k * binHz) / 1000.0f);
 
         tablesValid = false;
         reset();
@@ -135,7 +159,10 @@ public:
             std::fill (red[c].begin(), red[c].end(), 0.0f);
         }
         for (int p = 0; p < 3; ++p)
+        {
             std::fill (slowDb[p].begin(), slowDb[p].end(), -200.0f);
+            std::fill (detPow[p].begin(), detPow[p].end(), 0.0f);
+        }
         ringPos = 0;
         hopCount = 0;
         dryPos = 0;
@@ -149,6 +176,8 @@ public:
 
     // Multiplicateur de profondeur par case (éditeur de bandes), canal de traitement c
     float* getWeights (int c) noexcept { return weight[c].data(); }
+    // Zone écoutée en BAND LISTEN (0..1 par case)
+    float* getListenMask() noexcept { return listenMask.data(); }
 
     // --------------------------------------------------------------- audio
     void process (float* const* io, int numCh, const float* const* sc, int scCh, int n, const Settings& s)
@@ -167,6 +196,7 @@ public:
         mixSm.setTargetValue (s.mix);
         bypassSm.setTargetValue (s.bypass ? 1.0f : 0.0f);
         deltaSm.setTargetValue (s.delta ? 1.0f : 0.0f);
+        listenSm.setTargetValue (s.listen ? 1.0f : 0.0f);
 
         const int mask = N - 1;
         int done = 0;
@@ -230,10 +260,12 @@ public:
                 const float og   = outputSm.getNextValue();
                 const float bp   = bypassSm.getNextValue();
                 const float dl   = deltaSm.getNextValue();
+                const float ls   = listenSm.getNextValue();
                 for (int c = 0; c < numCh; ++c)
                 {
                     const float out = d[c] + mx * (w[c] * trim - d[c]);
-                    const float y = (out + dl * ((d[c] - out) - out)) * og;
+                    float y = (out + dl * ((d[c] - out) - out)) * og;
+                    y += ls * (w[c] * og - y);                 // BAND LISTEN : la sortie traitée EST le delta filtré
                     io[c][idx] = y + bp * (d[c] - y);
                 }
             }
@@ -255,6 +287,9 @@ public:
         int bins = 0;
         float binHz = 1.0f;
         int counter = 0;
+        // Résonances suivies (les creux les plus profonds de la trame)
+        int numTracked = 0;
+        std::array<float, maxTracked> trackedHz {}, trackedDb {};
     };
     UiData ui;
     std::atomic<float> overallReductionDb { 0.0f };   // baisse de niveau globale due au traitement
@@ -267,7 +302,8 @@ private:
         using juce::exactlyEqual;
         return ! exactlyEqual (s.detail, tDetail) || ! exactlyEqual (s.detailTilt, tDetailTilt)
             || ! exactlyEqual (s.attackMs, tAttack) || ! exactlyEqual (s.releaseMs, tRelease)
-            || ! exactlyEqual (s.timeTilt, tTimeTilt) || s.hard != tHard;
+            || ! exactlyEqual (s.attackTilt, tAttackTilt) || ! exactlyEqual (s.releaseTilt, tReleaseTilt)
+            || s.hard != tHard;
     }
 
     static void widthToRange (int k, float halfOct, int minHalf, int bins, int& lo, int& hi)
@@ -284,7 +320,7 @@ private:
     void updateTables (const Settings& s)
     {
         tDetail = s.detail; tDetailTilt = s.detailTilt; tAttack = s.attackMs;
-        tRelease = s.releaseMs; tTimeTilt = s.timeTilt; tHard = s.hard;
+        tRelease = s.releaseMs; tAttackTilt = s.attackTilt; tReleaseTilt = s.releaseTilt; tHard = s.hard;
 
         for (int k = 0; k < bins; ++k)
         {
@@ -292,10 +328,10 @@ private:
             const float octFrom1k = std::log2 (f / 1000.0f);
             const float d = juce::jlimit (0.0f, 1.0f, s.detail + s.detailTilt * 0.15f * octFrom1k);
 
-            // Résolution de détection : 1/3 oct (doux) -> 1/36 oct (chirurgical)
+            // Résolution de détection : 1/3 oct (accumulations) -> 1/36 oct (chirurgical)
             const float fineOct = (1.0f / 3.0f) * std::pow ((1.0f / 36.0f) / (1.0f / 3.0f), d);
-            // Enveloppe de référence : 2,5 oct -> 0,75 oct
-            const float envOct  = 2.5f * std::pow (0.75f / 2.5f, d);
+            // Enveloppe de référence : 4 oct -> 0,75 oct
+            const float envOct  = 4.0f * std::pow (0.75f / 4.0f, d);
             // Largeur des coupes
             const float maskOct = fineOct * 0.75f;
 
@@ -306,9 +342,17 @@ private:
             // Sélectivité : plus de détail = seuls les pics marqués sont traités
             thrDb[(size_t) k] = 0.5f + 1.5f * d;
 
-            const float tf = juce::jlimit (0.125f, 8.0f, std::exp2 (-s.timeTilt * 0.5f * octFrom1k));
-            const float att = std::max (0.05f, s.attackMs * tf) * 0.001f;
-            const float rel = std::max (0.5f, s.releaseMs * tf) * 0.001f;
+            // Lissage temporel de la détection : plus lent en détail élevé (soothe3)
+            const float tDet = (3.0f + 15.0f * d) * 0.001f;
+            coefDetUp[(size_t) k]   = std::exp (-frameSeconds / (tDet * 0.35f));
+            coefDetDown[(size_t) k] = std::exp (-frameSeconds / tDet);
+
+            // Temps : naturellement plus rapides dans l'aigu, puis TILT
+            const float base = juce::jlimit (0.35f, 3.0f, std::pow (1000.0f / f, 0.3f));
+            const float tfA = base * juce::jlimit (0.125f, 8.0f, std::exp2 (-s.attackTilt * 0.6f * octFrom1k));
+            const float tfR = base * juce::jlimit (0.125f, 8.0f, std::exp2 (-s.releaseTilt * 0.6f * octFrom1k));
+            const float att = std::max (0.05f, s.attackMs * tfA) * 0.001f;
+            const float rel = std::max (0.5f, s.releaseMs * tfR) * 0.001f;
             coefAtt[(size_t) k] = std::exp (-frameSeconds / att);
             coefRel[(size_t) k] = std::exp (-frameSeconds / rel);
         }
@@ -328,7 +372,7 @@ private:
         }
     }
 
-    // Interpolation linéaire entre les maxima locaux
+    // Interpolation linéaire entre les maxima locaux (seuil adaptatif)
     void upperHull (const float* src, float* dst) const
     {
         int prevK = -1;
@@ -358,36 +402,46 @@ private:
     {
         float* fine = fineDb[path].data();
         float* slow = slowDb[path].data();
+        float* dp   = detPow[path].data();
 
-        // 1. spectre de détection lissé (énergie) à la résolution DETAIL
+        // 1. spectre de détection : lissé en fréquence (DETAIL) puis dans le temps
         boxAverage (pw, tmpP.data(), fineLo, fineHi);
         for (int k = 0; k < bins; ++k)
-            fine[k] = 10.0f * std::log10 (tmpP[(size_t) k] + 1.0e-24f) - fsNorm;
+        {
+            const float p = tmpP[(size_t) k];
+            if (firstFrame) dp[k] = p;
+            else            dp[k] = p + (p > dp[k] ? coefDetUp[(size_t) k] : coefDetDown[(size_t) k]) * (dp[k] - p);
+            fine[k] = 10.0f * std::log10 (dp[k] + 1.0e-24f) - fsNorm;
+        }
 
-        // 2. enveloppe « haute » : on relie les sommets du spectre (les harmoniques
-        //    d'une voix ou d'un synthé ne sont pas des résonances : seul ce qui
-        //    dépasse ses voisins est visé)
+        // 2. enveloppe « haute » : on relie les sommets (les harmoniques normales
+        //    d'une voix ou d'un synthé ne sont pas des résonances)
         upperHull (fine, tmpB.data());
 
-        // 3. enveloppe de référence robuste : 2 passes, les pics écrêtés à +3 dB
+        // 3. enveloppe de référence robuste : 2 passes, pics écrêtés à +3 dB
         boxAverage (tmpB.data(), tmpA.data(), envLo, envHi);
         for (int k = 0; k < bins; ++k) tmpB[(size_t) k] = std::min (tmpB[(size_t) k], tmpA[(size_t) k] + 3.0f);
         boxAverage (tmpB.data(), tmpA.data(), envLo, envHi);
 
         const bool hard = settings.hard;
         const float knee = hard ? 1.5f : 8.0f;
-        const float depthScale = settings.depth * 0.1f;
+        const float depthScale = settings.depth / 6.0f;
+        constexpr float hardRef = -45.0f;   // niveau « fort » de référence (par case, pondéré rose)
 
         for (int k = 0; k < bins; ++k)
         {
             float x = fine[k] - tmpA[(size_t) k] - thrDb[(size_t) k];
+            float levelFactor = 1.0f;
 
             if (hard)
             {
-                // Montée soudaine par rapport au passé récent (comportement compresseur)
+                const float level = fine[k] + pinkDb[(size_t) k] + levelNorm;
+                // Seuil fixe : ce qui est fort en absolu est réduit davantage
+                levelFactor = juce::jlimit (0.3f, 2.0f, 1.0f + (level - hardRef) / 24.0f);
+                x = std::max (x, 0.5f * (level - (hardRef + 12.0f)));
+                // Montée soudaine par rapport au passé récent
                 if (firstFrame || slow[k] < -150.0f) slow[k] = fine[k];
-                const float xt = fine[k] - slow[k] - 4.0f;
-                x = std::max (x, xt);
+                x = std::max (x, fine[k] - slow[k] - 4.0f);
                 slow[k] = fine[k] + slowCoef * (slow[k] - fine[k]);
             }
 
@@ -398,7 +452,7 @@ private:
 
             // Rien sous le plancher de bruit
             const float gate = juce::jlimit (0.0f, 1.0f, (fine[k] + 110.0f) * 0.1f);
-            out[k] = depthScale * y * gate;
+            out[k] = depthScale * y * levelFactor * gate;
         }
         out[0] = 0.0f;
     }
@@ -448,6 +502,7 @@ private:
             computeTargets (linkPower.data(), 2, pathT[2].data());
         }
 
+        const bool listening = settings.listen;
         float peak = 0.0f;
         double eIn = 0.0, eOut = 0.0;
         for (int c = 0; c < nc; ++c)
@@ -477,8 +532,9 @@ private:
                 if (r[k] < 1.0e-4f) r[k] = 0.0f;
                 peak = std::max (peak, r[k]);
                 const float g = std::exp (-r[k] * 0.11512925f);   // 10^(-r/20)
-                sp[2 * k] *= g;
-                sp[2 * k + 1] *= g;
+                const float applied = listening ? (1.0f - g) * listenMask[(size_t) k] : g;
+                sp[2 * k] *= applied;
+                sp[2 * k + 1] *= applied;
                 eIn  += (double) pw[k];
                 eOut += (double) pw[k] * (double) (g * g);
             }
@@ -522,13 +578,46 @@ private:
             ui.outDb[(size_t) k] = 10.0f * std::log10 (pOut * norm + 1.0e-24f) - fsNorm;
             ui.redDb[(size_t) k] = rMax;
         }
+
+        // Résonances suivies : maxima locaux de la réduction, les plus profonds d'abord,
+        // espacés d'au moins 1/6 d'octave
+        int n = 0;
+        std::array<float, maxTracked> hz {}, db {};
+        const float* r = ui.redDb.data();
+        const int kMin = std::max (2, (int) (25.0f / binHz)), kMax = std::min (bins - 2, (int) (20000.0f / binHz));
+        for (int k = kMin; k <= kMax; ++k)
+        {
+            const float v = r[k];
+            if (v < 1.0f || v < r[k - 1] || v < r[k + 1]) continue;
+            // position affinée (parabole)
+            const float a = r[k - 1], b = v, c = r[k + 1];
+            const float den = a - 2.0f * b + c;
+            const float off = std::abs (den) > 1.0e-6f ? juce::jlimit (-0.5f, 0.5f, 0.5f * (a - c) / den) : 0.0f;
+            const float f = ((float) k + off) * binHz;
+
+            int near = -1;
+            for (int i = 0; i < n; ++i)
+                if (std::abs (std::log2 (f / hz[(size_t) i])) < 1.0f / 6.0f) { near = i; break; }
+            if (near >= 0)
+            {
+                if (v > db[(size_t) near]) { hz[(size_t) near] = f; db[(size_t) near] = v; }
+                continue;
+            }
+            if (n < maxTracked) { hz[(size_t) n] = f; db[(size_t) n] = v; ++n; continue; }
+            int weakest = 0;
+            for (int i = 1; i < n; ++i) if (db[(size_t) i] < db[(size_t) weakest]) weakest = i;
+            if (v > db[(size_t) weakest]) { hz[(size_t) weakest] = f; db[(size_t) weakest] = v; }
+        }
+        ui.numTracked = n;
+        ui.trackedHz = hz;
+        ui.trackedDb = db;
         ++ui.counter;
     }
 
     // ----------------------------------------------------------------- état
     double sr = 44100.0;
     int scale = 1, quality = 1, N = 2048, hop = 256, bins = 1025, nMax = 4096;
-    float binHz = 21.5f, frameSeconds = 0.0058f, olaGain = 1.0f, fsNorm = 0.0f, slowCoef = 0.97f;
+    float binHz = 21.5f, frameSeconds = 0.0058f, olaGain = 1.0f, fsNorm = 0.0f, levelNorm = 0.0f, slowCoef = 0.97f;
     std::array<std::unique_ptr<juce::dsp::FFT>, numQualities> ffts;
     juce::dsp::FFT* fft = nullptr;
 
@@ -537,20 +626,21 @@ private:
     std::vector<float> spec[maxChannels], scSpec[maxChannels];
     std::vector<float> power[maxChannels], scPower[maxChannels];
     std::vector<float> target[maxChannels], red[maxChannels], weight[maxChannels];
-    std::vector<float> fineDb[3], slowDb[3], pathT[3];
+    std::vector<float> fineDb[3], slowDb[3], detPow[3], pathT[3];
     std::vector<float> tmpA, tmpB, tmpP;
     std::vector<double> prefix;
     std::vector<int> fineLo, fineHi, envLo, envHi, maskLo, maskHi;
-    std::vector<float> thrDb, coefAtt, coefRel;
+    std::vector<float> thrDb, coefAtt, coefRel, coefDetUp, coefDetDown, pinkDb, listenMask;
     std::vector<float> window, linkPower;
 
     int ringPos = 0, hopCount = 0, dryPos = 0, procCh = 2;
     bool useSc = false, msActive = false, firstFrame = true;
     bool tablesValid = false;
-    float tDetail = -1, tDetailTilt = 0, tAttack = 0, tRelease = 0, tTimeTilt = 0;
+    float tDetail = -1, tDetailTilt = 0, tAttack = 0, tRelease = 0, tAttackTilt = 0, tReleaseTilt = 0;
     bool tHard = false;
     Settings settings;
 
-    juce::SmoothedValue<float> wetTrimSm { 1.0f }, outputSm { 1.0f }, mixSm { 1.0f }, bypassSm { 0.0f }, deltaSm { 0.0f };
+    juce::SmoothedValue<float> wetTrimSm { 1.0f }, outputSm { 1.0f }, mixSm { 1.0f }, bypassSm { 0.0f },
+                               deltaSm { 0.0f }, listenSm { 0.0f };
 };
 } // namespace velours

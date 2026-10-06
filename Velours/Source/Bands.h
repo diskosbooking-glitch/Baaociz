@@ -58,6 +58,8 @@ inline float responseDb (const Band& b, float f)
             return std::max (-120.0f, 2.0f * mag2db (1.0 / (s2 + s / q + 1.0)));
         case params::bandPass:
             return std::max (-120.0f, 2.0f * mag2db ((s / q) / (s2 + s / q + 1.0)) + b.gain);
+        case params::bandReject:  // zone où le traitement est retiré
+            return std::max (-120.0f, 2.0f * mag2db ((s2 + 1.0) / (s2 + s / q + 1.0)));
         case params::tilt:
         {
             const double oct = std::log2 (std::max (1.0e-6, (double) f) / std::max (1.0, (double) b.freq));
@@ -66,6 +68,30 @@ inline float responseDb (const Band& b, float f)
         default: break;
     }
     return 0.0f;
+}
+
+// Zone entendue en BAND LISTEN (0..1) : la région de fréquences que la bande « vise »
+inline float listenRegion (const Band& b, float f)
+{
+    using C = std::complex<double>;
+    const double q = std::max (0.05, (double) b.q);
+    const C s (0.0, std::max (1.0e-6, (double) f) / std::max (1.0, (double) b.freq));
+    const C s2 = s * s;
+    switch (b.type)
+    {
+        case params::bell:
+        case params::bandPass:
+        case params::bandReject:
+            return (float) std::norm ((s / q) / (s2 + s / q + 1.0)) ;
+        case params::lowShelf:
+        case params::highCut:
+            return (float) std::norm (1.0 / (s2 + s * 1.41421356 + 1.0));
+        case params::highShelf:
+        case params::lowCut:
+            return (float) std::norm (s2 / (s2 + s * 1.41421356 + 1.0));
+        default: break;
+    }
+    return 1.0f;
 }
 
 // La bande agit-elle sur ce canal de traitement ?

@@ -200,7 +200,20 @@ void ModularLookAndFeel::drawToggleButton (juce::Graphics& g, juce::ToggleButton
 static constexpr float fMin = 20.0f, fMax = 20000.0f;
 static constexpr float specTop = 0.0f, specBottom = -96.0f;   // dBFS (pente +4,5 dB/oct autour de 1 kHz)
 static constexpr float sensRange = 18.0f;                     // ± dB affichés pour les bandes
-static constexpr float redRange = 24.0f;                      // dB de réduction en haut de l'écran
+static constexpr float redRange = 30.0f;                      // dB de réduction (graphe de réduction, haut de l'écran)
+
+static juce::String noteName (float hz)
+{
+    static const char* names[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    if (hz <= 0.0f) return {};
+    const int midi = (int) std::lround (69.0 + 12.0 * std::log2 (hz / 440.0));
+    return juce::String (names[((midi % 12) + 12) % 12]) + juce::String (midi / 12 - 1);
+}
+
+static juce::String shortFreq (float hz)
+{
+    return hz >= 1000.0f ? juce::String (hz / 1000.0f, hz >= 10000.0f ? 1 : 2) + "k" : juce::String (juce::roundToInt (hz));
+}
 
 SpectrumDisplay::SpectrumDisplay (VeloursProcessor& p) : proc (p)
 {
@@ -218,6 +231,7 @@ void SpectrumDisplay::resized()
     colHi.assign ((size_t) w, 0);
     mappedBins = -1;
     for (auto& c : sensCurve) c.assign ((size_t) w, 0.0f);
+    for (auto& t : trails) t.assign ((size_t) w, 0.0f);
     curveChannels = 0;
     rebuildCurves();
 }
@@ -252,7 +266,7 @@ float SpectrumDisplay::yForSpec (float db, float f) const
 
 float SpectrumDisplay::yForRed (float db) const
 {
-    return plot.getY() + plot.getHeight() * 0.5f * juce::jlimit (0.0f, 1.0f, db / redRange);
+    return plot.getY() + 4.0f + (plot.getHeight() - 30.0f) * 0.86f * juce::jlimit (0.0f, 1.0f, db / redRange);
 }
 
 juce::RangedAudioParameter* SpectrumDisplay::bandParam (int band, const char* what) const
@@ -324,11 +338,16 @@ void SpectrumDisplay::timerCallback()
     auto& ui = proc.engine.ui;
     const int w = (int) colIn.size();
     bool fresh = false;
+    std::array<float, velours::Engine::maxTracked> tHz {}, tDb {};
+    int tN = 0;
     {
         const juce::SpinLock::ScopedLockType sl (ui.lock);
         if (ui.bins > 0 && ui.counter != lastCounter)
         {
             fresh = true;
+            tN = ui.numTracked;
+            tHz = ui.trackedHz;
+            tDb = ui.trackedDb;
             lastCounter = ui.counter;
             if (ui.bins != mappedBins || ! juce::exactlyEqual (ui.binHz, mappedBinHz))
             {
@@ -390,7 +409,114 @@ void SpectrumDisplay::timerCallback()
         o = tOut > o ? o + 0.7f * (tOut - o) : juce::jmax (tOut, o - 1.6f);
         r = tRed > r ? r + 0.8f * (tRed - r) : r + 0.25f * (tRed - r);
     }
+
+    updateTracks (tHz.data(), tDb.data(), fresh ? tN : 0);
+    if (++trailTick >= 2)
+    {
+        trailTick = 0;
+        trailPos = (trailPos + 1) % numTrails;
+        trails[(size_t) trailPos] = colRed;
+    }
+    maxCutDb = proc.apvts.getRawParameterValue ("maxcut")->load();
     repaint();
+}
+
+void SpectrumDisplay::updateTracks (const float* hz, const float* db, int n)
+{
+    for (auto& t : tracks) t.life = juce::jmax (0.0f, t.life - 0.07f);
+    std::array<bool, 8> matched {};
+    for (int i = 0; i < n; ++i)
+    {
+        if (db[i] < 1.0f) continue;
+        int best = -1;
+        float bestD = 1.0f / 6.0f;
+        for (int j = 0; j < (int) tracks.size(); ++j)
+        {
+            if (tracks[(size_t) j].life <= 0.0f || matched[(size_t) j]) continue;
+            const float d = std::abs (std::log2 (hz[i] / tracks[(size_t) j].hz));
+            if (d < bestD) { bestD = d; best = j; }
+        }
+        if (best < 0)
+            for (int j = 0; j < (int) tracks.size(); ++j)
+                if (tracks[(size_t) j].life <= 0.0f && ! matched[(size_t) j]) { best = j; tracks[(size_t) j].hz = hz[i]; tracks[(size_t) j].db = 0.0f; break; }
+        if (best < 0) continue;
+        auto& t = tracks[(size_t) best];
+        t.hz = std::exp2 (0.5f * std::log2 (t.hz) + 0.5f * std::log2 (hz[i]));
+        t.db += 0.6f * (db[i] - t.db);
+        t.life = 1.0f;
+        matched[(size_t) best] = true;
+    }
+}
+
+void SpectrumDisplay::drawTracking (juce::Graphics& g)
+{
+    // Marqueurs sur les creux suivis
+    std::vector<int> order;
+    for (int i = 0; i < (int) tracks.size(); ++i)
+        if (tracks[(size_t) i].life > 0.05f && tracks[(size_t) i].db >= 1.0f) order.push_back (i);
+    std::sort (order.begin(), order.end(), [this] (int a, int b) { return tracks[(size_t) a].hz < tracks[(size_t) b].hz; });
+
+    float lastLabelX = -1000.0f;
+    for (int i : order)
+    {
+        const auto& t = tracks[(size_t) i];
+        const float x = xForFreq (t.hz), y = yForRed (t.db);
+        const float a = juce::jlimit (0.0f, 1.0f, t.life);
+        g.setColour (palette::coral.withAlpha (0.35f * a));
+        g.drawLine (x, plot.getY(), x, y, 1.0f);
+        g.setColour (palette::coral.withAlpha (a));
+        g.fillEllipse (juce::Rectangle<float> (8.0f, 8.0f).withCentre ({ x, y }));
+        g.setColour (juce::Colours::white.withAlpha (0.9f * a));
+        g.drawEllipse (juce::Rectangle<float> (11.0f, 11.0f).withCentre ({ x, y }), 1.2f);
+        if (x - lastLabelX > 64.0f)
+        {
+            const juce::String txt = shortFreq (t.hz) + "  -" + juce::String (t.db, 1);
+            g.setColour (palette::card.withAlpha (0.75f * a));
+            const auto r = juce::Rectangle<float> (66.0f, 15.0f).withCentre ({ x, y + 17.0f });
+            g.fillRoundedRectangle (r, 4.0f);
+            g.setColour (palette::text.withAlpha (a));
+            g.setFont (bold (10.5f));
+            g.drawText (txt, r, juce::Justification::centred);
+            lastLabelX = x;
+        }
+    }
+
+    // Liste TRACKING (les plus profondes)
+    std::vector<int> byDepth = order;
+    std::sort (byDepth.begin(), byDepth.end(), [this] (int a, int b) { return tracks[(size_t) a].db > tracks[(size_t) b].db; });
+    const int rows = juce::jmin (4, (int) byDepth.size());
+    auto box = juce::Rectangle<float> (plot.getRight() - 214.0f, plot.getBottom() - 34.0f - 20.0f - 17.0f * 4.0f, 200.0f, 26.0f + 17.0f * 4.0f);
+    g.setColour (palette::card.withAlpha (0.85f));
+    g.fillRoundedRectangle (box, 7.0f);
+    g.setColour (palette::coral.withAlpha (0.5f));
+    g.drawRoundedRectangle (box, 7.0f, 1.0f);
+    auto inner = box.reduced (10.0f, 6.0f);
+    g.setColour (palette::coral);
+    g.setFont (bold (10.5f));
+    g.drawText ("TRACKING", inner.removeFromTop (16.0f), juce::Justification::centredLeft);
+    g.setFont (bold (11.5f));
+    for (int r = 0; r < 4; ++r)
+    {
+        auto row = inner.removeFromTop (17.0f);
+        if (r >= rows)
+        {
+            if (r == 0)
+            {
+                g.setColour (palette::textDim);
+                g.setFont (plain (11.0f));
+                g.drawText ("no resonance cut", row, juce::Justification::centredLeft);
+            }
+            continue;
+        }
+        const auto& t = tracks[(size_t) byDepth[(size_t) r]];
+        const float a = juce::jlimit (0.3f, 1.0f, t.life);
+        g.setColour (palette::text.withAlpha (a));
+        g.drawText (params::freqText (t.hz), row.withWidth (78.0f), juce::Justification::centredLeft);
+        g.setColour (palette::textDim.withAlpha (a));
+        g.drawText (noteName (t.hz), row.withX (row.getX() + 80.0f).withWidth (40.0f), juce::Justification::centredLeft);
+        g.setColour (palette::coral.withAlpha (a));
+        g.drawText ("-" + juce::String (t.db, 1) + " dB", row, juce::Justification::centredRight);
+    }
 }
 
 void SpectrumDisplay::paint (juce::Graphics& g)
@@ -414,10 +540,14 @@ void SpectrumDisplay::paint (juce::Graphics& g)
         g.setColour (palette::edge.withAlpha (0.55f));
         g.drawVerticalLine ((int) xForFreq (f), plot.getY(), plot.getBottom());
     }
-    g.setColour (palette::grid);
-    for (float db : { -12.0f, -6.0f, 6.0f, 12.0f })
-        g.drawHorizontalLine ((int) yForSens (db), plot.getX(), plot.getRight());
-    g.setColour (palette::edge.withAlpha (0.6f));
+    // Graphe de réduction : lignes à -3, -6, -12, -18, -24 dB
+    for (int i = 0; i < 5; ++i)
+    {
+        const float db[] = { 3.0f, 6.0f, 12.0f, 18.0f, 24.0f };
+        g.setColour (palette::coral.withAlpha (i == 2 || i == 4 ? 0.13f : 0.08f));
+        g.drawHorizontalLine ((int) yForRed (db[i]), plot.getX(), plot.getRight());
+    }
+    g.setColour (palette::butter.withAlpha (0.12f));
     g.drawHorizontalLine ((int) yForSens (0.0f), plot.getX(), plot.getRight());
 
     const int w = (int) colIn.size();
@@ -458,8 +588,42 @@ void SpectrumDisplay::paint (juce::Graphics& g)
         g.fillPath (inPath);
         g.setColour (palette::textDim.withAlpha (0.45f));
         g.strokePath (inPath, juce::PathStrokeType (1.0f));
-        g.setColour (palette::sky.withAlpha (0.85f));
-        g.strokePath (outPath, juce::PathStrokeType (1.4f));
+        g.setColour (palette::sky.withAlpha (0.55f));
+        g.strokePath (outPath, juce::PathStrokeType (1.1f));
+
+        // Zone au-delà de MAX CUT : grisée (comme soothe3)
+        if (maxCutDb < redRange - 0.05f)
+        {
+            const float ym = yForRed (maxCutDb);
+            g.setColour (juce::Colours::black.withAlpha (0.28f));
+            g.fillRect (juce::Rectangle<float> (plot.getX(), ym, plot.getWidth(), yForRed (redRange) - ym + 2.0f));
+            juce::Path ml;
+            ml.startNewSubPath (plot.getX(), ym);
+            ml.lineTo (plot.getRight(), ym);
+            juce::Path dashed;
+            const float dashes[] = { 5.0f, 4.0f };
+            juce::PathStrokeType (1.0f).createDashedStroke (dashed, ml, dashes, 2);
+            g.setColour (palette::textDim.withAlpha (0.7f));
+            g.fillPath (dashed);
+            g.setFont (bold (10.0f));
+            g.drawText ("MAX CUT -" + juce::String (maxCutDb, 1) + " dB", juce::Rectangle<float> (plot.getX() + 12.0f, ym + 3.0f, 140.0f, 14.0f),
+                        juce::Justification::centredLeft);
+        }
+
+        // Traînées : les dernières courbes, de plus en plus pâles
+        for (int i = 1; i < numTrails; ++i)
+        {
+            const auto& tr = trails[(size_t) ((trailPos - i + numTrails) % numTrails)];
+            if ((int) tr.size() != w) continue;
+            juce::Path p;
+            for (int x = 0; x < w; ++x)
+            {
+                const float y = yForRed (tr[(size_t) x]);
+                if (x == 0) p.startNewSubPath (colX (x), y); else p.lineTo (colX (x), y);
+            }
+            g.setColour (palette::coral.withAlpha (0.30f * (1.0f - (float) i / (float) numTrails)));
+            g.strokePath (p, juce::PathStrokeType (1.0f));
+        }
 
         // Réduction : courbe qui descend du haut de l'écran
         juce::Path red;
@@ -502,6 +666,8 @@ void SpectrumDisplay::paint (juce::Graphics& g)
         else
             g.strokePath (s, juce::PathStrokeType (1.8f));
     }
+
+    drawTracking (g);
 
     // Nœuds des bandes
     for (int b = 0; b < params::numBands; ++b)
@@ -559,8 +725,24 @@ void SpectrumDisplay::paint (juce::Graphics& g)
     {
         g.setColour (palette::textDim.withAlpha (0.8f));
         g.setFont (plain (11.5f));
-        g.drawText ("Double-click: add band   |   Drag: move   |   Wheel: Q   |   Right-click: type, focus, delete",
-                    juce::Rectangle<float> (plot.getX() + 12.0f, plot.getY() + 8.0f, 600.0f, 18.0f), juce::Justification::centredLeft);
+        g.setFont (plain (11.0f));
+        g.drawText ("Double-click: add band  |  Drag: move  |  Wheel: Q  |  Alt+drag: listen  |  Right-click: options",
+                    juce::Rectangle<float> (plot.getX() + 372.0f, plot.getBottom() - 20.0f, 470.0f, 16.0f), juce::Justification::centredLeft);
+    }
+
+    // BAND LISTEN en cours
+    const int lb = proc.listenBand.load();
+    if (lb >= 0)
+    {
+        const juce::String t = "LISTENING BAND " + juce::String (lb + 1) + " : you hear only what is removed there";
+        const auto font = bold (12.0f);
+        auto box = juce::Rectangle<float> (20.0f + juce::GlyphArrangement::getStringWidth (font, t), 24.0f)
+                       .withCentre ({ plot.getCentreX(), plot.getY() + 52.0f });
+        g.setColour (palette::band (lb));
+        g.fillRoundedRectangle (box, 12.0f);
+        g.setColour (palette::ink);
+        g.setFont (font);
+        g.drawText (t, box, juce::Justification::centred);
     }
 
     // Fréquence sous la souris
@@ -577,8 +759,8 @@ void SpectrumDisplay::paint (juce::Graphics& g)
     // Échelle de réduction
     g.setColour (palette::coral.withAlpha (0.75f));
     g.setFont (plain (10.0f));
-    for (float db : { 6.0f, 12.0f, 18.0f })
-        g.drawText ("-" + juce::String ((int) db), juce::Rectangle<float> (plot.getRight() - 34.0f, yForRed (db) - 7.0f, 30.0f, 14.0f),
+    for (float db : { 3.0f, 6.0f, 12.0f, 18.0f, 24.0f })
+        g.drawText ("-" + juce::String ((int) db) + " dB", juce::Rectangle<float> (plot.getRight() - 44.0f, yForRed (db) - 13.0f, 40.0f, 12.0f),
                     juce::Justification::centredRight);
 
     // Légende
@@ -641,8 +823,12 @@ void SpectrumDisplay::mouseDown (const juce::MouseEvent& e)
     selected = b;
     dragging = b;
     if (b >= 0)
+    {
         for (auto* what : { "freq", "gain" })
             if (auto* p = bandParam (b, what)) p->beginChangeGesture();
+        if (proc.bandListenOnDrag.load() || e.mods.isAltDown())
+            proc.listenBand = b;
+    }
 }
 
 void SpectrumDisplay::mouseDrag (const juce::MouseEvent& e)
@@ -663,6 +849,7 @@ void SpectrumDisplay::mouseUp (const juce::MouseEvent&)
         for (auto* what : { "freq", "gain" })
             if (auto* p = bandParam (dragging, what)) p->endChangeGesture();
     dragging = -1;
+    proc.listenBand = -1;
 }
 
 void SpectrumDisplay::mouseDoubleClick (const juce::MouseEvent& e)
@@ -881,14 +1068,15 @@ Panel::Panel (VeloursProcessor& p) : proc (p), display (p), meter (p)
     detailTilt.attach (s, "detailTilt", "DETAIL TILT", palette::lavender, "Changes Detail with frequency: + = more detail in the highs, - = in the lows");
     attack.attach (s, "attack", "ATTACK", palette::mint, "How fast the cuts react");
     release.attach (s, "release", "RELEASE", palette::mint, "How fast the cuts recover");
-    timeTilt.attach (s, "timeTilt", "TIME TILT", palette::mint, "Changes attack/release with frequency: + = faster highs and slower lows");
+    timeTilt.attach (s, "timeTilt", "ATTACK TILT", palette::mint, "Changes attack with frequency: + = faster highs and slower lows");
+    releaseTilt.attach (s, "releaseTilt", "RELEASE TILT", palette::mint, "Changes release with frequency: + = faster highs and slower lows");
     maxCut.attach (s, "maxcut", "MAX CUT", palette::coral, "Hard limit on the attenuation applied at any frequency");
     link.attach (s, "link", "LINK", palette::sky, "Stereo link: 100 % = same processing on both channels (image preserved)");
     mix.attach (s, "mix", "MIX", palette::butter, "Dry / processed balance (phase-aligned)");
     wetTrim.attach (s, "wetTrim", "WET TRIM", palette::butter, "Gain of the processed signal only");
     output.attach (s, "output", "OUTPUT", palette::butter, "Output gain");
 
-    for (auto* k : { &depth, &detail, &detailTilt, &attack, &release, &timeTilt, &maxCut, &link, &mix, &wetTrim, &output })
+    for (auto* k : { &depth, &detail, &detailTilt, &attack, &release, &timeTilt, &releaseTilt, &maxCut, &link, &mix, &wetTrim, &output })
         addAndMakeVisible (k);
 
     modeSeg = std::make_unique<ChoiceSegments> (*s.getParameter ("mode"), juce::StringArray { "SOFT", "HARD" }, palette::peach);
@@ -901,6 +1089,15 @@ Panel::Panel (VeloursProcessor& p) : proc (p), display (p), meter (p)
     attachToggle (sidechain, "sidechain", "SIDECHAIN", palette::sky, "Detect resonances on the external sidechain input");
     attachToggle (delta, "delta", "DELTA", palette::rose, "Listen only to what is being removed");
     attachToggle (bypass, "bypass", "BYPASS", palette::coral, "Bypass (latency compensated)");
+
+    bandListen.setButtonText ("BAND LISTEN");
+    setAccent (bandListen, palette::rose);
+    bandListen.setTooltip ("While you drag a band, hear only what is removed in that band's area (Alt+drag does it too)");
+    bandListen.setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    bandListen.setToggleState (proc.bandListenOnDrag.load(), juce::dontSendNotification);
+    bandListen.onClick = [this] { proc.bandListenOnDrag = bandListen.getToggleState(); };
+    bandListen.setClickingTogglesState (true);
+    addAndMakeVisible (bandListen);
 
     addAndMakeVisible (meter);
     scInfo.setFont (plain (10.5f));
@@ -999,6 +1196,9 @@ void Panel::timerCallback()
                                      : juce::String ("No sidechain routed: main input used");
     if (scInfo.getText() != t) scInfo.setText (t, juce::dontSendNotification);
     scInfo.setColour (juce::Label::textColourId, scOn && ! connected ? palette::coral : palette::textDim);
+
+    if (bandListen.getToggleState() != proc.bandListenOnDrag.load())
+        bandListen.setToggleState (proc.bandListenOnDrag.load(), juce::dontSendNotification);
 
     const bool stereo = proc.processChannels.load() > 1;
     link.setEnabled (stereo);
@@ -1105,10 +1305,11 @@ void Panel::resized()
     modeSeg->setBounds (shape.getX() + 18, shape.getY() + 176, 130, 30);
     detailTilt.setBounds (shape.getRight() - 112, shape.getY() + 152, 92, 88);
 
-    // TIME
+    // TIME : attaque / relâchement, puis leurs tilts
     attack.setBounds (time.getX() + 10, time.getY() + 24, 86, 104);
     release.setBounds (time.getRight() - 96, time.getY() + 24, 86, 104);
-    timeTilt.setBounds (time.getCentreX() - 46, time.getY() + 140, 92, 98);
+    timeTilt.setBounds (time.getX() + 6, time.getY() + 140, 94, 98);
+    releaseTilt.setBounds (time.getRight() - 100, time.getY() + 140, 94, 98);
 
     // LIMIT
     maxCut.setBounds (limit.getCentreX() - 46, limit.getY() + 24, 92, 104);
@@ -1125,7 +1326,8 @@ void Panel::resized()
     mix.setBounds (out.getX() + 10, out.getY() + 24, kw, 104);
     wetTrim.setBounds (out.getX() + 10 + kw, out.getY() + 24, kw, 104);
     output.setBounds (out.getX() + 10 + 2 * kw, out.getY() + 24, kw, 104);
-    delta.setBounds (out.getX() + 16, out.getY() + 170, out.getWidth() - 32, 32);
+    delta.setBounds (out.getX() + 16, out.getY() + 150, out.getWidth() - 32, 32);
+    bandListen.setBounds (out.getX() + 16, out.getY() + 192, out.getWidth() - 32, 32);
 }
 
 // ============================================================================

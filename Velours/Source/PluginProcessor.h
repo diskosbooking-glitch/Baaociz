@@ -49,6 +49,10 @@ public:
     juce::AudioProcessorValueTreeState apvts;
     velours::Engine engine;
 
+    // BAND LISTEN : bande écoutée (-1 = aucune), réglée par l'écran pendant un glisser
+    std::atomic<int> listenBand { -1 };
+    std::atomic<bool> bandListenOnDrag { false };
+
     std::atomic<bool> sidechainConnected { false };
     std::atomic<int> processChannels { 2 };
     std::atomic<double> currentRate { 48000.0 };
@@ -56,10 +60,13 @@ public:
 private:
     velours::Settings readSettings() const;
     void updateWeights (int numChannels, bool midSide, bool force);
+    void updateListenMask (int band);
 
     std::array<bands::Band, params::numBands> lastBands {};
     int lastWeightChannels = -1, lastWeightBins = -1;
     bool lastWeightMS = false;
+    bands::Band lastListen {};
+    int lastListenBand = -2, lastListenBins = -1;
 
     juce::AudioParameterBool* bypassParam = nullptr;
     int currentProgram = 0;
@@ -69,7 +76,7 @@ private:
     std::array<BandParams, params::numBands> bandRaw {};
     std::atomic<float>* raw (const char* id) const { return apvts.getRawParameterValue (id); }
     std::atomic<float> *pDepth, *pDetail, *pAttack, *pRelease, *pMaxCut, *pMode, *pDetailTilt, *pTimeTilt,
-                       *pStereo, *pLink, *pSidechain, *pMix, *pWetTrim, *pOutput, *pDelta, *pBypass, *pQuality;
+                       *pStereo, *pLink, *pSidechain, *pMix, *pWetTrim, *pOutput, *pDelta, *pBypass, *pQuality, *pReleaseTilt;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VeloursProcessor)
 };

@@ -113,6 +113,18 @@ private:
     std::vector<float> sensCurve[2];               // dB de sensibilité par colonne, par canal
     bool curvesDiffer = false;
 
+    // Résonances suivies (lissées d'une image à l'autre)
+    struct Track { float hz = 1000.0f, db = 0.0f, life = 0.0f; };
+    std::array<Track, 8> tracks {};
+    void updateTracks (const float* hz, const float* db, int n);
+    void drawTracking (juce::Graphics&);
+
+    // Traînées : les dernières courbes de réduction, pour voir le suivi bouger
+    static constexpr int numTrails = 8;
+    std::array<std::vector<float>, numTrails> trails;
+    int trailPos = 0, trailTick = 0;
+    float maxCutDb = 30.0f;
+
     int selected = -1, dragging = -1, hover = -1;
     juce::Point<float> hoverPos;
     bool showHover = false;
@@ -187,9 +199,9 @@ private:
 
     SpectrumDisplay display;
 
-    LabelledKnob depth, detail, detailTilt, attack, release, timeTilt, maxCut, link, mix, wetTrim, output;
+    LabelledKnob depth, detail, detailTilt, attack, release, timeTilt, releaseTilt, maxCut, link, mix, wetTrim, output;
     std::unique_ptr<ChoiceSegments> modeSeg, stereoSeg;
-    juce::ToggleButton sidechain, delta, bypass;
+    juce::ToggleButton sidechain, delta, bypass, bandListen;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> buttonAttachments;
     ReductionMeter meter;
     juce::Label scInfo;

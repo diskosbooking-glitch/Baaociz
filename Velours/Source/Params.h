@@ -9,10 +9,10 @@ namespace params
 {
 inline constexpr int numBands = 8;
 
-enum BandType { bell = 0, lowShelf, highShelf, lowCut, highCut, bandPass, tilt, numBandTypes };
+enum BandType { bell = 0, lowShelf, highShelf, lowCut, highCut, bandPass, tilt, bandReject, numBandTypes };
 enum BandFocus { focusAll = 0, focusLeft, focusRight, focusMid, focusSide };
 
-inline const juce::StringArray bandTypeNames  { "Bell", "Low Shelf", "High Shelf", "Low Cut", "High Cut", "Band Pass", "Tilt" };
+inline const juce::StringArray bandTypeNames  { "Bell", "Low Shelf", "High Shelf", "Low Cut", "High Cut", "Band Pass", "Tilt", "Band Reject" };
 inline const juce::StringArray bandFocusNames { "All", "Left", "Right", "Mid", "Side" };
 inline const juce::StringArray qualityNames   { "Low Latency", "Normal", "High Res" };
 
@@ -54,12 +54,13 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     using namespace juce;
     std::vector<std::unique_ptr<RangedAudioParameter>> p;
 
+    // v = version d'apparition du paramètre (1 = v0.1, 2 = v0.2) : les hôtes AU gardent ainsi l'ordre
     auto fl = [&] (const String& id, const String& name, NormalisableRange<float> r, float def, const String& label,
-                   std::function<String (float, int)> toText = nullptr)
+                   std::function<String (float, int)> toText = nullptr, int v = 1)
     {
         auto attr = AudioParameterFloatAttributes().withLabel (label);
         if (toText) attr = attr.withStringFromValueFunction (toText);
-        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id, 1 }, name, r, def, attr));
+        p.push_back (std::make_unique<AudioParameterFloat> (ParameterID { id, v }, name, r, def, attr));
     };
     auto flag = [&] (const String& id, const String& name, bool def)
     {
@@ -85,7 +86,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
 
     // --- Tilt (soothe3) ---
     fl ("detailTilt", "Detail Tilt", NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%", signedPct);
-    fl ("timeTilt",   "Time Tilt",   NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%", signedPct);
+    fl ("timeTilt",   "Attack Tilt", NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%", signedPct);   // id historique
 
     // --- Stéréo / sidechain ---
     choice ("stereo", "Stereo Mode", StringArray { "L/R", "M/S" }, 0);
@@ -114,6 +115,9 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
                 [] (float v, int) { return String (v, 2); });
         choice (bandId (b, "focus"), n + "Focus", bandFocusNames, focusAll);
     }
+
+    // ------------------------------------------------------------------ v0.2
+    fl ("releaseTilt", "Release Tilt", NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%", signedPct, 2);
 
     return { p.begin(), p.end() };
 }
