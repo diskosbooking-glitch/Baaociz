@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 # ---- Numero de version du plugin : incrementer a chaque mise a jour ----
-project(Velours VERSION 0.2.0)
+project(Velours VERSION 0.3.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -46,6 +46,11 @@ target_sources(Velours PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp)
 
+# Police Inter (SIL Open Font License, voir Resources/Inter-OFL.txt) embarquée
+juce_add_binary_data(VeloursData SOURCES
+    Resources/Inter-Regular.ttf
+    Resources/Inter-SemiBold.ttf)
+
 target_compile_definitions(Velours PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
@@ -55,6 +60,7 @@ target_compile_definitions(Velours PUBLIC
 
 target_link_libraries(Velours
     PRIVATE
+        VeloursData
         juce::juce_audio_utils
         juce::juce_dsp
     PUBLIC

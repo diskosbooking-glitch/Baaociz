@@ -1,4 +1,4 @@
-# Velours v0.2.0 — Aociz
+# Velours v0.3.0 — Aociz
 
 Suppresseur de résonances dynamique AU + VST3 (macOS), inspiré de soothe3
 (oeksound). Il repère en continu les fréquences qui « sonnent » trop (dureté
@@ -22,8 +22,11 @@ et les atténue uniquement quand elles apparaissent.
 | **SIDECHAIN** | La détection se fait sur l'entrée sidechain |
 | **MIX, WET TRIM, OUTPUT** | Dosage sec/traité (aligné en phase), gain du traité seul, gain de sortie |
 | **DELTA** | N'écouter que ce qui est retiré |
-| **BAND LISTEN** | Pendant qu'on déplace une bande : n'entendre que ce qui est retiré dans sa zone (Alt + glisser fait pareil) |
-| **Résolution** | Low Latency (21 ms), Normal (43 ms), High Res (85 ms, résolution la plus fine) — latence compensée par le DAW |
+| **LISTEN** (barre de bande) / Alt + glisser | N'entendre que ce qui est retiré dans la zone d'une bande |
+| **FOCUS** | Déplace le traitement vers L/Mid (à gauche) ou R/Side (à droite) |
+| **RESOLUTION** | Low Latency (21 ms), Normal (43 ms), High Res (85 ms, résolution la plus fine) — latence compensée par le DAW |
+| **QUALITY** | Résolution temporelle : Normal, High (2x CPU), Ultra (4x CPU), sans changer la latence. **RENDER IN ULTRA** : Ultra automatique à l'export |
+| **A / B, UNDO / REDO, SAVE** | Comparaison de deux réglages, annuler/rétablir, presets utilisateur (~/Library/Application Support/Velours/Presets) |
 
 ## Éditeur de bandes (écran central)
 
@@ -31,24 +34,34 @@ La courbe jaune règle la **sensibilité** du traitement selon la fréquence (ce
 n'est pas un égaliseur). Par défaut : coupe-bas, une cloche, coupe-haut.
 Jusqu'à 8 bandes : cloche, shelf grave/aigu, coupe-bas/haut, passe-bande, coupe-bande (Band Reject), tilt.
 
-- **double-clic** dans le vide : ajouter une bande ;
+- **double-clic** dans le vide : ajouter une bande (Cmd + double-clic : passe-bande) ;
+- **clic** sur une bande : elle s'édite dans la **barre sous le graphe** (ON, LISTEN,
+  forme, fréquence, profondeur, Q, focus, suppression), comme dans soothe3 ;
 - **glisser** une bande : fréquence + sensibilité (Maj = fréquence seule) ;
-- **molette** : largeur (Q) ;
-- **clic droit** : type, **Focus** stéréo (All / Left / Right / Mid / Side), supprimer ;
-- **double-clic** sur une bande : la retirer.
+- **molette** : largeur (Q), Maj + molette = réglage fin ;
+- **double-clic** sur une bande : la mettre en pause (cercle vide) / la réactiver ;
+- **clic droit** : forme, **Focus** stéréo (All / Left / Right / Mid / Side), pause, supprimer.
 
 Les zones grisées ne sont pas traitées. En M/S ou L/R, si des bandes ont un
 Focus différent, la courbe du 2e canal apparaît en pointillés.
 
-## Écran (graphe de réduction, comme soothe3)
+## Interface (v0.3)
 
-La courbe rose descend du haut de l'écran : c'est la réduction en cours, en dB,
-fréquence par fréquence (repères -3 à -24 dB à droite). Les traînées pâles
-montrent les dernières positions : on voit les coupes **suivre** les
-résonances. Chaque creux suivi porte un repère (fréquence + dB) et le cadre
-**TRACKING** liste les 4 résonances les plus coupées (fréquence, note, dB).
-La zone grise sous le pointillé = au-delà de MAX CUT. Gris clair = spectre
-d'entrée, bleu = sortie, jaune = courbe de sensibilité.
+Sobre et lisible, dans l'esprit de soothe3 mais avec l'identité Velours :
+gris profond, un seul accent « velours », police Inter embarquée.
+
+- à gauche : **DEPTH** et **DETAIL** (gros potards), **ATTACK / RELEASE**, **SOFT / HARD** ;
+- au centre : le **graphe de réduction**. L'aplat rose descend du haut : c'est la
+  réduction en cours, fréquence par fréquence (repères -3 à -24 dB). Le trait
+  rose pâle garde la trace des coupes récentes. Les points marquent les
+  résonances suivies et la liste **TRACKING** donne les 4 plus coupées
+  (fréquence, note, dB). Courbe blanche = courbe de profondeur (bandes). Zone
+  assombrie sous le pointillé = au-delà de MAX CUT ;
+- sous le graphe : la **barre de la bande sélectionnée** ;
+- à droite : **TILT** (detail, attack, release), **MAX CUT / WET TRIM**,
+  **STEREO** (L/R – M/S, LINK, FOCUS, SIDECHAIN), **RENDER IN ULTRA** ;
+- en bas : BYPASS, DELTA, MIX, OUTPUT, réduction moyenne, RESOLUTION, QUALITY ;
+- en haut : presets (usine + utilisateur, SAVE), A / B, UNDO / REDO, taille de fenêtre.
 
 ## Vérifications avant envoi
 
@@ -61,7 +74,9 @@ Banc d'essai hors DAW (vrais fichiers source, JUCE 8.0.9) :
 - BAND LISTEN : on entend le retiré dans la zone de la bande, le reste est 40 dB plus bas ;
 - voix synthétique (harmoniques) : la résonance est coupée, les harmoniques
   normales restent intactes (-0,1 à -0,5 dB à Detail 50 et plus) ;
-- un état sauvegardé en v0.1 se recharge correctement ;
+- un état sauvegardé en v0.1 / v0.2 se recharge correctement ;
+- QUALITY High / Ultra : même réduction qu'en Normal (-10,1 dB), même latence, reconstruction parfaite ;
+- FOCUS +100 % : canal gauche intact, droit traité (-15 dB) ; A/B, annuler et presets utilisateur vérifiés ;
 - Max Cut respecté au dixième de dB ; Delta + traité = signal sec exact ;
   bypass et mix 0 % alignés sur la latence ;
 - sidechain, mono, M/S, blocs de taille aléatoire, silence, impulsions : aucune
@@ -69,6 +84,15 @@ Banc d'essai hors DAW (vrais fichiers source, JUCE 8.0.9) :
 - pluginval niveau 10 : réussi ; CPU ~2 à 12 % d'un cœur selon la résolution.
 
 ## Historique
+
+**v0.3.0** — nouvelle interface et améliorations techniques :
+- interface entièrement redessinée (sobre, un accent, police Inter, grand graphe
+  de réduction, barre de bande façon soothe3, panneau latéral, pied de page) ;
+- QUALITY Normal / High / Ultra (pas de 5,3 / 2,7 / 1,3 ms) sans changer la
+  latence, et **Ultra automatique au rendu** (comme soothe3) ;
+- FOCUS stéréo global ; bandes en pause (double-clic sur le nœud) ;
+- A / B, annuler / rétablir, presets utilisateur ;
+- écran plus léger (100 images/s max) même en Ultra.
 
 **v0.2.0** — action nettement plus audible et vrai suivi des résonances :
 - coupes presque 2 fois plus profondes à réglage égal (résonance test :
