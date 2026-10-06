@@ -1,0 +1,41 @@
+name: Build Velours (macOS)
+
+on:
+  push:
+    paths:
+      - 'Velours/**'
+      - '.github/workflows/build-velours-mac.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: Mac (AU + VST3) -> .dmg
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compilation + auval + .dmg
+        run: bash Velours/ci/build_mac.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Velours-Mac
+          path: Velours/out/
+          if-no-files-found: error
+
+      - name: Release (lien de telechargement direct)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(sed -n 's/^project(Velours VERSION \([0-9.]*\)).*/\1/p' Velours/CMakeLists.txt)"
+          TAG="velours-v${VERSION}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" Velours/out/* --clobber
+          else
+            gh release create "$TAG" Velours/out/* --target "$GITHUB_SHA" \
+              --title "Velours ${VERSION}" \
+              --notes "Build automatique AU + VST3. Ouvrir le .dmg puis double-clic sur l'installateur .pkg (ou glisser les plugins sur leurs raccourcis)."
+          fi
