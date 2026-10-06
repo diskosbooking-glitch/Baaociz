@@ -1,0 +1,10 @@
+#!/bin/bash
+# Supprime les anciennes versions de Velours avant installation
+CONSOLE_USER=$(stat -f%Su /dev/console)
+USER_HOME=$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+
+for BASE in "/Library/Audio/Plug-Ins" "$USER_HOME/Library/Audio/Plug-Ins"; do
+    [ -z "$BASE" ] && continue
+    rm -rf "$BASE/Components/Velours.component" "$BASE/VST3/Velours.vst3"
+done
+exit 0
