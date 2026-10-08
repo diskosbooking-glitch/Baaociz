@@ -1,4 +1,4 @@
-# Velours v0.3.0 — Aociz
+# Velours v1.0.0 — Aociz
 
 Suppresseur de résonances dynamique AU + VST3 (macOS), inspiré de soothe3
 (oeksound). Il repère en continu les fréquences qui « sonnent » trop (dureté
@@ -24,9 +24,10 @@ et les atténue uniquement quand elles apparaissent.
 | **DELTA** | N'écouter que ce qui est retiré |
 | **LISTEN** (barre de bande) / Alt + glisser | N'entendre que ce qui est retiré dans la zone d'une bande |
 | **FOCUS** | Déplace le traitement vers L/Mid (à gauche) ou R/Side (à droite) |
-| **RESOLUTION** | Low Latency (21 ms), Normal (43 ms), High Res (85 ms, résolution la plus fine) — latence compensée par le DAW |
+| **RESOLUTION** | Low Latency (21 ms), Normal (43 ms), High Res (85 ms, résolution la plus fine) — latence compensée par le DAW. **Zero Latency** : aucun retard (filtrage à phase minimale), pour enregistrer ou jouer en direct. La latence réelle s'affiche à côté du titre |
 | **QUALITY** | Résolution temporelle : Normal, High (2x CPU), Ultra (4x CPU), sans changer la latence. **RENDER IN ULTRA** : Ultra automatique à l'export |
-| **A / B, UNDO / REDO, SAVE** | Comparaison de deux réglages, annuler/rétablir, presets utilisateur (~/Library/Application Support/Velours/Presets) |
+| **GAIN MATCH** | Compense automatiquement le volume retiré par le traitement (pondération proche de l'oreille, réaction lente) : la comparaison avec BYPASS se fait à volume égal. La compensation s'affiche en haut à droite de REDUCTION. Inactif en DELTA |
+| **A / B, UNDO / REDO, SAVE** | Comparaison de deux réglages, annuler/rétablir, presets utilisateur (~/Library/Application Support/Velours/Presets). Un point rose dans le menu des presets = réglages modifiés depuis le chargement |
 
 ## Éditeur de bandes (écran central)
 
@@ -45,7 +46,7 @@ Jusqu'à 8 bandes : cloche, shelf grave/aigu, coupe-bas/haut, passe-bande, coupe
 Les zones grisées ne sont pas traitées. En M/S ou L/R, si des bandes ont un
 Focus différent, la courbe du 2e canal apparaît en pointillés.
 
-## Interface (v0.3)
+## Interface
 
 Sobre et lisible, dans l'esprit de soothe3 mais avec l'identité Velours :
 gris profond, un seul accent « velours », police Inter embarquée.
@@ -60,8 +61,10 @@ gris profond, un seul accent « velours », police Inter embarquée.
 - sous le graphe : la **barre de la bande sélectionnée** ;
 - à droite : **TILT** (detail, attack, release), **MAX CUT / WET TRIM**,
   **STEREO** (L/R – M/S, LINK, FOCUS, SIDECHAIN), **RENDER IN ULTRA** ;
-- en bas : BYPASS, DELTA, MIX, OUTPUT, réduction moyenne, RESOLUTION, QUALITY ;
-- en haut : presets (usine + utilisateur, SAVE), A / B, UNDO / REDO, taille de fenêtre.
+- en bas : BYPASS, DELTA, MIX, OUTPUT, GAIN MATCH, réduction moyenne, RESOLUTION, QUALITY ;
+- en haut : presets (usine + utilisateur, SAVE), A / B, UNDO / REDO, taille de fenêtre ;
+- la fenêtre se redimensionne librement (coin en bas à droite, de 60 % à 200 %,
+  proportions conservées) ; la taille est mémorisée avec le projet.
 
 ## Vérifications avant envoi
 
@@ -81,9 +84,26 @@ Banc d'essai hors DAW (vrais fichiers source, JUCE 8.0.9) :
   bypass et mix 0 % alignés sur la latence ;
 - sidechain, mono, M/S, blocs de taille aléatoire, silence, impulsions : aucune
   valeur invalide ;
+- Zero Latency : latence 0, signal identique à l'entrée quand rien n'est coupé
+  (44,1 à 192 kHz), même réduction que le mode normal (-9,9 dB contre -10,1),
+  filtre causal (rien avant l'instant t), Delta + traité = sec ;
+- Gain Match : écart de volume perçu ramené de -3,3 dB à -0,3 dB ;
 - pluginval niveau 10 : réussi ; CPU ~2 à 12 % d'un cœur selon la résolution.
 
 ## Historique
+
+**v1.0.0** — revue complète du code et finitions :
+- **Zero Latency** : nouvelle résolution sans aucun retard (filtre à phase
+  minimale calculé à partir de la même détection, transitions sans clic) ;
+- **GAIN MATCH** : compensation automatique du volume, pondérée comme l'oreille ;
+- fenêtre **redimensionnable** à la souris (60 à 200 %), proportions fixes ;
+- graphe plus fluide (60 images/s, lissage indépendant de la cadence, plus de
+  scintillement entre deux blocs audio de l'hôte) ; étiquettes des résonances
+  sans chevauchement ;
+- unités sur tous les réglages (ms, %, dB), latence affichée, point « preset
+  modifié » ;
+- sauvegarde de preset dans un panneau intégré (plus de fenêtre séparée,
+  plus fiable dans Logic / Ableton / FL Studio), avertissement si le nom existe déjà.
 
 **v0.3.0** — nouvelle interface et améliorations techniques :
 - interface entièrement redessinée (sobre, un accent, police Inter, grand graphe
