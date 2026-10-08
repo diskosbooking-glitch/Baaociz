@@ -14,7 +14,7 @@ enum BandFocus { focusAll = 0, focusLeft, focusRight, focusMid, focusSide };
 
 inline const juce::StringArray bandTypeNames  { "Bell", "Low Shelf", "High Shelf", "Low Cut", "High Cut", "Band Pass", "Tilt", "Band Reject" };
 inline const juce::StringArray bandFocusNames { "All", "Left", "Right", "Mid", "Side" };
-inline const juce::StringArray qualityNames   { "Low Latency", "Normal", "High Res" };
+inline const juce::StringArray qualityNames   { "Low Latency", "Normal", "High Res", "Zero Latency" };
 inline const juce::StringArray timeQualityNames { "Normal", "High", "Ultra" };
 
 inline juce::String bandId (int band, const char* what) { return "b" + juce::String (band + 1) + "_" + what; }
@@ -127,6 +127,9 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     flag ("renderUltra", "Render in Ultra", true, 3);
     fl ("focus", "Stereo Focus", NormalisableRange<float> (-100.0f, 100.0f, 0.1f), 0.0f, "%",
         [] (float v, int) { const int i = roundToInt (v); return i == 0 ? String ("C") : (i < 0 ? "L/M " + String (-i) : "R/S " + String (i)); }, 3);
+
+    // ------------------------------------------------------------------ v1.0
+    flag ("gainMatch", "Gain Match", false, 4);
 
     return { p.begin(), p.end() };
 }

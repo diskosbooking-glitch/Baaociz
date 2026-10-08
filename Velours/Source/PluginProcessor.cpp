@@ -23,6 +23,7 @@ VeloursProcessor::VeloursProcessor()
     pTimeQuality = raw ("timeQuality");
     pRenderUltra = raw ("renderUltra");
     pFocus = raw ("focus");
+    pGainMatch = raw ("gainMatch");
 
     for (int b = 0; b < params::numBands; ++b)
     {
@@ -36,6 +37,7 @@ VeloursProcessor::VeloursProcessor()
         r.byp   = apvts.getRawParameterValue (params::bandId (b, "byp"));
     }
     apvts.state.setProperty ("presetName", "Init", nullptr);
+    capturePresetSnapshot();
 }
 
 bool VeloursProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -162,6 +164,7 @@ velours::Settings VeloursProcessor::readSettings() const
     s.outputDb   = pOutput->load();
     s.delta      = pDelta->load() > 0.5f;
     s.bypass     = pBypass->load() > 0.5f;
+    s.gainMatch  = pGainMatch->load() > 0.5f;
     return s;
 }
 
@@ -174,8 +177,7 @@ void VeloursProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     const int numCh = juce::jmax (1, mainIn);
     if (n == 0 || mainIn == 0) return;
 
-    // Résolution (change la latence)
-    // Résolution (change la latence) et qualité temporelle (ne la change pas).
+    // Résolution (change la latence ; « Zero Latency » = 0) et qualité temporelle (ne la change pas).
     // Rendu hors-ligne : qualité Ultra automatique, comme soothe3.
     const int q = juce::roundToInt (pQuality->load());
     const int tq = (pRenderUltra->load() > 0.5f && isNonRealtime()) ? 2 : juce::roundToInt (pTimeQuality->load());
@@ -259,6 +261,7 @@ void VeloursProcessor::loadFactoryPreset (int index)
         set (params::bandId (b, "byp"), 0.0f);
     }
     apvts.state.setProperty ("presetName", p.name, nullptr);
+    capturePresetSnapshot();
 }
 
 // ---------------------------------------------------------------- presets utilisateur
@@ -267,6 +270,7 @@ bool VeloursProcessor::saveUserPreset (const juce::String& name)
     const auto clean = juce::File::createLegalFileName (name.trim());
     if (clean.isEmpty()) return false;
     apvts.state.setProperty ("presetName", clean, nullptr);
+    capturePresetSnapshot();
     auto state = apvts.copyState();
     for (auto* key : { "uiScale", "program", "bandListen", "version" }) state.removeProperty (key, nullptr);
     if (auto xml = state.createXml())
@@ -296,6 +300,7 @@ bool VeloursProcessor::loadUserPreset (const juce::File& file)
     undoManager.beginNewTransaction();
     applyStateValues (juce::ValueTree::fromXml (*xml));
     apvts.state.setProperty ("presetName", file.getFileNameWithoutExtension(), nullptr);
+    capturePresetSnapshot();
     return true;
 }
 
@@ -310,6 +315,7 @@ void VeloursProcessor::selectSlot (int slot)
     applyStateValues (slots[slot]);
     apvts.state.setProperty ("presetName", slots[slot].getProperty ("presetName", "Init"), nullptr);
     activeSlot = slot;
+    capturePresetSnapshot();
 }
 
 void VeloursProcessor::copyToOtherSlot()
@@ -347,7 +353,30 @@ void VeloursProcessor::setStateInformation (const void* data, int sizeInBytes)
                         bp->setValueNotifyingHost (snapped);
                 }
             undoManager.clearUndoHistory();
+            capturePresetSnapshot();
         }
+}
+
+// ---------------------------------------------------------------- preset modifié ?
+void VeloursProcessor::capturePresetSnapshot()
+{
+    presetSnapshot.clear();
+    for (auto* prm : getParameters())
+        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (prm))
+            presetSnapshot.push_back (presets::isProtected (rp->getParameterID()) || rp->getParameterID() == "delta"
+                                          ? -1.0f : rp->getValue());
+}
+
+bool VeloursProcessor::isPresetModified() const
+{
+    int i = 0;
+    for (auto* prm : getParameters())
+    {
+        if (i >= (int) presetSnapshot.size()) return false;
+        const float ref = presetSnapshot[(size_t) i++];
+        if (ref >= 0.0f && std::abs (prm->getValue() - ref) > 1.0e-4f) return true;
+    }
+    return false;
 }
 
 juce::AudioProcessorEditor* VeloursProcessor::createEditor() { return new VeloursEditor (*this); }

@@ -81,7 +81,7 @@ inline const std::vector<Preset>& factory()
 // Paramètres que les presets ne touchent pas
 inline bool isProtected (const juce::String& id)
 {
-    return id == "bypass" || id == "quality" || id == "timeQuality" || id == "renderUltra";
+    return id == "bypass" || id == "quality" || id == "timeQuality" || id == "renderUltra" || id == "gainMatch";
 }
 
 inline juce::File userFolder()

@@ -6,9 +6,12 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#if JUCE_MAC || JUCE_IOS
+ #include <Accelerate/Accelerate.h>
+#endif
 
 // ============================================================================
-//  Velours — moteur de suppression dynamique des résonances (v0.2)
+//  Velours — moteur de suppression dynamique des résonances (v1.0)
 //
 //  Principe (même famille que soothe3) :
 //   1. STFT (fenêtre de Hann, recouvrement 4x à 16x, une trame toutes les ~5 ms) ;
@@ -26,7 +29,10 @@
 //      dans l'aigu, modulés par ATTACK TILT et RELEASE TILT ;
 //   7. suivi des résonances : les creux les plus marqués sont publiés pour
 //      l'écran (fréquence, profondeur) à chaque trame ;
-//   8. BAND LISTEN : on n'entend que ce qui est retiré dans la zone d'une bande.
+//   8. BAND LISTEN : on n'entend que ce qui est retiré dans la zone d'une bande ;
+//   9. ZERO LATENCY : la même analyse pilote un filtre à phase minimale
+//      (calculé par cepstre à chaque trame) appliqué sans retard ;
+//  10. GAIN MATCH : compense la baisse de niveau (mesure pondérée rose, lente).
 // ============================================================================
 namespace velours
 {
@@ -48,13 +54,16 @@ struct Settings
     bool delta = false, bypass = false;
     bool listen = false;         // écoute de la zone d'une bande (delta filtré)
     float focus = 0.0f;          // -1 = tout sur L/M, +1 = tout sur R/S
+    bool gainMatch = false;      // compensation automatique du niveau
 };
 
 class Engine
 {
 public:
     static constexpr int maxChannels = 2;
-    static constexpr int numQualities = 3;
+    static constexpr int numQualities = 3;   // tailles FFT (Low Latency, Normal, High Res)
+    static constexpr int zeroLatencyIndex = 3; // RESOLUTION « Zero Latency »
+    static constexpr int maxFir = 2048;
     static constexpr int maxTracked = 6;
 
     // --------------------------------------------------------------- setup
@@ -106,6 +115,16 @@ public:
         listenMask.assign ((size_t) binsMax, 0.0f);
         window.assign ((size_t) nMax, 0.0f);
         linkPower.assign ((size_t) binsMax, 0.0f);
+        weightW.assign ((size_t) binsMax, 0.0f);
+        cep.assign ((size_t) nMax * 2, 0.0f);
+        for (int c = 0; c < maxChannels; ++c)
+        {
+            firCur[c].assign ((size_t) maxFir, 0.0f);
+            firPrev[c].assign ((size_t) maxFir, 0.0f);
+            hist[c].assign ((size_t) (maxFir + 256 * scale), 0.0f);
+            wetCur[c].assign ((size_t) (256 * scale), 0.0f);
+            wetPrev[c].assign ((size_t) (256 * scale), 0.0f);
+        }
 
         {
             // l'écran lit ces tableaux sur un autre fil : jamais de réallocation hors verrou
@@ -117,7 +136,7 @@ public:
             ui.redDb.assign ((size_t) binsMax, 0.0f);
         }
 
-        for (auto* s : { &wetTrimSm, &outputSm, &mixSm, &bypassSm, &deltaSm, &listenSm })
+        for (auto* s : { &wetTrimSm, &outputSm, &mixSm, &bypassSm, &deltaSm, &listenSm, &makeupSm })
             s->reset (sr, 0.03);
 
         setQuality (initialQuality, initialTimeQuality);
@@ -128,7 +147,8 @@ public:
     // Sans allocation ; remet l'état à zéro.
     void setQuality (int q, int tq)
     {
-        quality = juce::jlimit (0, numQualities - 1, q);
+        zeroLatency = q == zeroLatencyIndex;
+        quality = zeroLatency ? 1 : juce::jlimit (0, numQualities - 1, q);   // l'analyse reste en « Normal »
         timeQuality = juce::jlimit (0, 2, tq);
         N = (1024 << quality) * scale;
         hop = (256 >> timeQuality) * scale;
@@ -145,7 +165,11 @@ public:
         levelNorm = 5.0f * std::log10 ((float) N / 2048.0f); // niveau comparable d'une résolution à l'autre
 
         for (int k = 0; k < bins; ++k)
+        {
             pinkDb[(size_t) k] = 3.0f * std::log2 (std::max (20.0f, (float) k * binHz) / 1000.0f);
+            weightW[(size_t) k] = loudnessWeight ((float) k * binHz);
+        }
+        firLen = std::min (maxFir, N / 2);
 
         tablesValid = false;
         reset();
@@ -167,16 +191,28 @@ public:
             std::fill (slowDb[p].begin(), slowDb[p].end(), -200.0f);
             std::fill (detPow[p].begin(), detPow[p].end(), 0.0f);
         }
+        for (int c = 0; c < maxChannels; ++c)
+        {
+            std::fill (firCur[c].begin(), firCur[c].end(), 0.0f);
+            std::fill (firPrev[c].begin(), firPrev[c].end(), 0.0f);
+            firCur[c][0] = firPrev[c][0] = 1.0f;     // filtre neutre
+            curIdentity[c] = prevIdentity[c] = true;
+            std::fill (hist[c].begin(), hist[c].end(), 0.0f);
+        }
         ringPos = 0;
         hopCount = 0;
         dryPos = 0;
         firstFrame = true;
+        makeupDb = 0.0f;
+        loudIn = loudOut = 0.0;
+        makeupSm.setCurrentAndTargetValue (1.0f);
     }
 
-    int getLatency() const noexcept   { return N; }
+    int getLatency() const noexcept   { return zeroLatency ? 0 : N; }
+    bool isZeroLatency() const noexcept { return zeroLatency; }
     int getNumBins() const noexcept   { return bins; }
     float getBinHz() const noexcept   { return binHz; }
-    int getQuality() const noexcept   { return quality; }
+    int getQuality() const noexcept   { return zeroLatency ? zeroLatencyIndex : quality; }
     int getTimeQuality() const noexcept { return timeQuality; }
 
     // Multiplicateur de profondeur par case (éditeur de bandes), canal de traitement c
@@ -202,6 +238,13 @@ public:
         bypassSm.setTargetValue (s.bypass ? 1.0f : 0.0f);
         deltaSm.setTargetValue (s.delta ? 1.0f : 0.0f);
         listenSm.setTargetValue (s.listen ? 1.0f : 0.0f);
+        makeupSm.setTargetValue (s.gainMatch && ! s.delta ? juce::Decibels::decibelsToGain (makeupDb) : 1.0f);
+
+        if (zeroLatency)
+        {
+            processZeroLatency (io, numCh, sc, scCh, n);
+            return;
+        }
 
         const int mask = N - 1;
         int done = 0;
@@ -266,13 +309,9 @@ public:
                 const float bp   = bypassSm.getNextValue();
                 const float dl   = deltaSm.getNextValue();
                 const float ls   = listenSm.getNextValue();
+                const float mk   = makeupSm.getNextValue();
                 for (int c = 0; c < numCh; ++c)
-                {
-                    const float out = d[c] + mx * (w[c] * trim - d[c]);
-                    float y = (out + dl * ((d[c] - out) - out)) * og;
-                    y += ls * (w[c] * og - y);                 // BAND LISTEN : la sortie traitée EST le delta filtré
-                    io[c][idx] = y + bp * (d[c] - y);
-                }
+                    io[c][idx] = mixSample (d[c], w[c], trim, mx, og, bp, dl, ls, mk);
             }
             hopCount += todo;
             done += todo;
@@ -281,6 +320,176 @@ public:
                 processFrame();
                 hopCount = 0;
             }
+        }
+    }
+
+    // Pondération d'écoute (approximation de la pondération K des LUFS, ITU-R BS.1770) :
+    // passe-haut ~38 Hz + plateau +4 dB au-dessus de ~1,5 kHz. Valeur en puissance.
+    static float loudnessWeight (float f) noexcept
+    {
+        if (f <= 0.0f) return 0.0f;
+        const float f4 = f * f * f * f, c4 = 38.0f * 38.0f * 38.0f * 38.0f;
+        const float hp = f4 / (f4 + c4);
+        const float shelf = 1.0f + 1.5119f * (f * f) / (f * f + 1500.0f * 1500.0f);   // 10^(4/10) - 1 = 1,5119
+        return hp * shelf;
+    }
+
+    // Sortie : sec / traité, trim, delta, écoute de bande, bypass, compensation
+    static inline float mixSample (float d, float w, float trim, float mx, float og, float bp, float dl, float ls, float mk) noexcept
+    {
+        const float out = d + mx * (w * trim - d);               // ce que le traitement produit
+        const float delta = d - out;                             // ce qui est retiré
+        float y = (out + mx * w * trim * (mk - 1.0f)) * og;      // + compensation de niveau
+        y += dl * (delta * og - y);
+        y += ls * (w * og - y);                                  // BAND LISTEN : la sortie traitée EST le delta filtré
+        return y + bp * (d - y);
+    }
+
+    // ---------------------------------------------------------- zéro latence
+    // y[i] = somme h[j] x[L-1+i-j] : x pointe sur l'historique (L-1 échantillons passés puis le bloc)
+    static void convolve (const float* x, const float* h, int L, float* y, int n) noexcept
+    {
+       #if JUCE_MAC || JUCE_IOS
+        vDSP_conv (x, 1, h + L - 1, -1, y, 1, (vDSP_Length) n, (vDSP_Length) L);
+       #else
+        for (int i = 0; i < n; ++i)
+        {
+            const float* xp = x + i + L - 1;
+            float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+            int j = 0;
+            for (; j + 3 < L; j += 4)
+            {
+                a0 += h[j] * xp[-j];
+                a1 += h[j + 1] * xp[-j - 1];
+                a2 += h[j + 2] * xp[-j - 2];
+                a3 += h[j + 3] * xp[-j - 3];
+            }
+            for (; j < L; ++j) a0 += h[j] * xp[-j];
+            y[i] = (a0 + a1) + (a2 + a3);
+        }
+       #endif
+    }
+
+    void processZeroLatency (float* const* io, int numCh, const float* const* sc, int scCh, int n)
+    {
+        const int mask = N - 1;
+        const int L = firLen;
+        int done = 0;
+        while (done < n)
+        {
+            const int todo = std::min (n - done, hop - hopCount);
+
+            // 1. entrées -> anneau d'analyse + historique de convolution
+            for (int i = 0; i < todo; ++i)
+            {
+                const int idx = done + i;
+                float x[maxChannels] {}, k[maxChannels] {}, e[maxChannels] {};
+                for (int c = 0; c < numCh; ++c) x[c] = io[c][idx];
+                if (useSc)
+                {
+                    if (scCh >= numCh) for (int c = 0; c < numCh; ++c) k[c] = sc[c][idx];
+                    else { const float m = sc[0][idx]; for (int c = 0; c < numCh; ++c) k[c] = m; }
+                }
+                if (msActive)
+                {
+                    e[0] = 0.5f * (x[0] + x[1]);
+                    e[1] = 0.5f * (x[0] - x[1]);
+                    if (useSc)
+                    {
+                        scRing[0][(size_t) ringPos] = scCh < 2 ? k[0] : 0.5f * (k[0] + k[1]);
+                        scRing[1][(size_t) ringPos] = scCh < 2 ? k[0] : 0.5f * (k[0] - k[1]);
+                    }
+                }
+                else
+                {
+                    for (int c = 0; c < numCh; ++c)
+                    {
+                        e[c] = x[c];
+                        if (useSc) scRing[c][(size_t) ringPos] = k[c];
+                    }
+                }
+                for (int c = 0; c < numCh; ++c)
+                {
+                    inRing[c][(size_t) ringPos] = e[c];
+                    hist[c][(size_t) (L - 1 + hopCount + i)] = e[c];
+                }
+                ringPos = (ringPos + 1) & mask;
+            }
+
+            // 2. filtrage sans retard (fondu entre le filtre précédent et le nouveau sur la trame)
+            for (int c = 0; c < numCh; ++c)
+            {
+                const float* x = hist[c].data() + hopCount;
+                float* wc = wetCur[c].data();
+                float* wp = wetPrev[c].data();
+                if (curIdentity[c]) std::copy (x + L - 1, x + L - 1 + todo, wc);
+                else convolve (x, firCur[c].data(), L, wc, todo);
+                if (prevIdentity[c]) std::copy (x + L - 1, x + L - 1 + todo, wp);
+                else convolve (x, firPrev[c].data(), L, wp, todo);
+                const float inv = 1.0f / (float) hop;
+                for (int i = 0; i < todo; ++i)
+                {
+                    const float t = (float) (hopCount + i + 1) * inv;
+                    wc[i] = wp[i] + t * (wc[i] - wp[i]);
+                }
+            }
+
+            // 3. mélange (sec = entrée, sans retard)
+            for (int i = 0; i < todo; ++i)
+            {
+                const int idx = done + i;
+                float w[maxChannels] {};
+                for (int c = 0; c < numCh; ++c) w[c] = wetCur[c][(size_t) i];
+                if (msActive) { const float m = w[0], sd = w[1]; w[0] = m + sd; w[1] = m - sd; }
+                const float trim = wetTrimSm.getNextValue();
+                const float mx   = mixSm.getNextValue();
+                const float og   = outputSm.getNextValue();
+                const float bp   = bypassSm.getNextValue();
+                const float dl   = deltaSm.getNextValue();
+                const float ls   = listenSm.getNextValue();
+                const float mk   = makeupSm.getNextValue();
+                for (int c = 0; c < numCh; ++c)
+                    io[c][idx] = mixSample (io[c][idx], w[c], trim, mx, og, bp, dl, ls, mk);
+            }
+
+            hopCount += todo;
+            done += todo;
+            if (hopCount == hop)
+            {
+                processFrame();
+                hopCount = 0;
+                for (int c = 0; c < numCh; ++c)   // garde les L-1 derniers échantillons
+                    std::memmove (hist[c].data(), hist[c].data() + hop, sizeof (float) * (size_t) (L - 1));
+            }
+        }
+    }
+
+    // Filtre à phase minimale de module |H| = gains (cepstre replié), tronqué à firLen points
+    void designMinPhase (const float* logMag, float* h)
+    {
+        float* cb = cep.data();
+        for (int k = 0; k < bins; ++k) { cb[2 * k] = logMag[k]; cb[2 * k + 1] = 0.0f; }
+        std::fill (cb + 2 * bins, cb + 2 * N, 0.0f);
+        fft->performRealOnlyInverseTransform (cb);                 // cepstre réel (pair)
+        const int half = N / 2;
+        for (int i = 1; i < half; ++i) cb[i] *= 2.0f;              // repli causal
+        std::fill (cb + half + 1, cb + 2 * N, 0.0f);
+        fft->performRealOnlyForwardTransform (cb, true);
+        for (int k = 0; k < bins; ++k)
+        {
+            const float m = std::exp (cb[2 * k]);
+            const float ph = cb[2 * k + 1];
+            cb[2 * k] = m * std::cos (ph);
+            cb[2 * k + 1] = m * std::sin (ph);
+        }
+        fft->performRealOnlyInverseTransform (cb);                 // réponse impulsionnelle
+        const int L = firLen, taper = L / 4;
+        for (int i = 0; i < L; ++i)
+        {
+            float w = 1.0f;
+            if (i >= L - taper)
+                w = 0.5f + 0.5f * std::cos (juce::MathConstants<float>::pi * (float) (i - (L - taper)) / (float) taper);
+            h[i] = cb[i] * w;
         }
     }
 
@@ -299,6 +508,7 @@ public:
     UiData ui;
     std::atomic<float> overallReductionDb { 0.0f };   // baisse de niveau globale due au traitement
     std::atomic<float> peakReductionDb { 0.0f };      // plus forte coupure en cours
+    std::atomic<float> makeupDbOut { 0.0f };           // compensation GAIN MATCH estimée
 
 private:
     // ----------------------------------------------------------- tables par case
@@ -509,7 +719,7 @@ private:
 
         const bool listening = settings.listen;
         float peak = 0.0f;
-        double eIn = 0.0, eOut = 0.0;
+        double eIn = 0.0, eOut = 0.0;     // énergies pondérées « K » (mesure + GAIN MATCH)
         for (int c = 0; c < nc; ++c)
         {
             float* t = target[c].data();
@@ -541,10 +751,27 @@ private:
                 peak = std::max (peak, r[k]);
                 const float g = std::exp (-r[k] * 0.11512925f);   // 10^(-r/20)
                 const float applied = listening ? (1.0f - g) * listenMask[(size_t) k] : g;
+                eIn  += (double) (pw[k] * weightW[(size_t) k]);
+                eOut += (double) (pw[k] * weightW[(size_t) k]) * (double) (g * g);
+                if (zeroLatency)
+                {
+                    tmpB[(size_t) k] = listening ? std::log (std::max (1.0e-5f, applied)) : -r[k] * 0.11512925f;
+                    continue;
+                }
                 sp[2 * k] *= applied;
                 sp[2 * k + 1] *= applied;
-                eIn  += (double) pw[k];
-                eOut += (double) pw[k] * (double) (g * g);
+            }
+
+            if (zeroLatency)
+            {
+                // nouveau filtre ; l'ancien sert au fondu pendant la trame suivante
+                std::swap (firPrev[c], firCur[c]);
+                prevIdentity[c] = curIdentity[c];
+                bool identity = ! listening;
+                for (int k = 0; k < bins && identity; ++k) identity = r[k] <= 0.0f;
+                curIdentity[c] = identity;
+                if (! identity) designMinPhase (tmpB.data(), firCur[c].data());
+                continue;
             }
 
             // synthèse + recouvrement-addition
@@ -561,7 +788,18 @@ private:
 
         firstFrame = false;
         peakReductionDb.store (peak);
-        overallReductionDb.store (eIn > 1.0e-12 ? (float) (10.0 * std::log10 (eIn / std::max (1.0e-30, eOut))) : 0.0f);
+        const float frameRed = eIn > 1.0e-12 ? (float) (10.0 * std::log10 (eIn / std::max (1.0e-30, eOut))) : 0.0f;
+        overallReductionDb.store (frameRed);
+
+        // GAIN MATCH : énergies moyennées lentement (~1,5 s), puis écart en dB
+        {
+            const double a = std::exp (-(double) frameSeconds / 1.5);
+            loudIn  = eIn  + a * (loudIn  - eIn);
+            loudOut = eOut + a * (loudOut - eOut);
+            if (loudIn > 1.0e-6)
+                makeupDb = juce::jlimit (0.0f, 12.0f, (float) (10.0 * std::log10 (loudIn / std::max (1.0e-30, loudOut))));
+        }
+        makeupDbOut.store (makeupDb);
         // écran : ~100 images/s suffisent, même en qualité Ultra
         publishTimer += frameSeconds;
         if (publishTimer >= 0.0099f) { publishTimer = 0.0f; publishUi (nc); }
@@ -641,7 +879,13 @@ private:
     std::vector<double> prefix;
     std::vector<int> fineLo, fineHi, envLo, envHi, maskLo, maskHi;
     std::vector<float> thrDb, coefAtt, coefRel, coefDetUp, coefDetDown, pinkDb, listenMask;
-    std::vector<float> window, linkPower;
+    std::vector<float> window, linkPower, weightW, cep;
+    std::vector<float> firCur[maxChannels], firPrev[maxChannels], hist[maxChannels], wetCur[maxChannels], wetPrev[maxChannels];
+    bool curIdentity[maxChannels] { true, true }, prevIdentity[maxChannels] { true, true };
+    bool zeroLatency = false;
+    int firLen = 1024;
+    float makeupDb = 0.0f;
+    double loudIn = 0.0, loudOut = 0.0;
 
     int ringPos = 0, hopCount = 0, dryPos = 0, procCh = 2;
     float publishTimer = 1.0f;
@@ -652,6 +896,6 @@ private:
     Settings settings;
 
     juce::SmoothedValue<float> wetTrimSm { 1.0f }, outputSm { 1.0f }, mixSm { 1.0f }, bypassSm { 0.0f },
-                               deltaSm { 0.0f }, listenSm { 0.0f };
+                               deltaSm { 0.0f }, listenSm { 0.0f }, makeupSm { 1.0f };
 };
 } // namespace velours

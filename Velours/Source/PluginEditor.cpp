@@ -116,6 +116,13 @@ void VeloursLookAndFeel::drawTooltip (juce::Graphics& g, const juce::String& tip
     tl.draw (g, { 9.0f, 6.0f, (float) w - 18.0f, (float) h - 12.0f });
 }
 
+void VeloursLookAndFeel::drawCornerResizer (juce::Graphics& g, int w, int h, bool over, bool dragging)
+{
+    g.setColour ((over || dragging) ? ui::dim : ui::faint);
+    for (float i : { 0.0f, 4.0f, 8.0f })
+        g.drawLine ((float) w - 3.0f - i, (float) h - 2.0f, (float) w - 2.0f, (float) h - 3.0f - i, 1.2f);
+}
+
 void VeloursLookAndFeel::drawComboBox (juce::Graphics& g, int w, int h, bool, int, int, int, int, juce::ComboBox& box)
 {
     auto r = juce::Rectangle<float> (0.0f, 0.0f, (float) w, (float) h).reduced (0.5f);
@@ -311,7 +318,7 @@ static constexpr float redRange = 30.0f;     // dB de réduction affichés
 
 SpectrumDisplay::SpectrumDisplay (VeloursProcessor& p) : proc (p)
 {
-    startTimerHz (30);
+    startTimerHz (60);
 }
 
 void SpectrumDisplay::resized()
@@ -323,6 +330,8 @@ void SpectrumDisplay::resized()
     colHold.assign ((size_t) w, 0.0f);
     colLo.assign ((size_t) w, 0);
     colHi.assign ((size_t) w, 0);
+    scratchIn.assign ((size_t) w, -200.0f);
+    scratchRed.assign ((size_t) w, 0.0f);
     mappedBins = -1;
     for (auto& c : sensCurve) c.assign ((size_t) w, 0.0f);
     curveChannels = 0;
@@ -425,6 +434,11 @@ void SpectrumDisplay::timerCallback()
             selectBand (-1);
     }
 
+    // pas de temps réel : le lissage ne dépend pas de la cadence du minuteur
+    const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+    const float dt = lastTick > 0.0 ? (float) juce::jlimit (0.002, 0.1, now - lastTick) : 1.0f / 60.0f;
+    lastTick = now;
+
     auto& ui = proc.engine.ui;
     const int w = (int) colIn.size();
     bool fresh = false;
@@ -455,6 +469,7 @@ void SpectrumDisplay::timerCallback()
             }
             scratchIn.resize ((size_t) w);
             scratchRed.resize ((size_t) w);
+            lastFresh = now;
             for (int x = 0; x < w; ++x)
             {
                 float a = -200.0f, r = 0.0f;
@@ -480,26 +495,35 @@ void SpectrumDisplay::timerCallback()
         }
     }
 
+    // l'hôte livre l'audio par blocs : entre deux blocs on garde la dernière
+    // image ; sans nouvelle image depuis 250 ms (lecture arrêtée), tout retombe
+    const bool stale = now - lastFresh > 0.25 || (int) scratchIn.size() != w;
+    const float k = dt * 30.0f;                       // en « images de référence » à 30 Hz
+    auto coef = [k] (float c) { return 1.0f - std::pow (1.0f - c, k); };
+    const float inUp = coef (0.6f), redUp = coef (0.8f), redDown = coef (0.25f);
+    const float inFall = 36.0f * dt, holdFall = 7.5f * dt;
     for (int x = 0; x < w; ++x)
     {
-        const float tIn = fresh ? scratchIn[(size_t) x] : -200.0f;
-        const float tRed = fresh ? scratchRed[(size_t) x] : 0.0f;
+        const float tIn = stale ? -200.0f : scratchIn[(size_t) x];
+        const float tRed = stale ? 0.0f : scratchRed[(size_t) x];
         auto& a = colIn[(size_t) x];
         auto& r = colRed[(size_t) x];
         auto& h = colHold[(size_t) x];
-        a = tIn > a ? a + 0.6f * (tIn - a) : juce::jmax (tIn, a - 1.2f);
-        r = tRed > r ? r + 0.8f * (tRed - r) : r + 0.25f * (tRed - r);
-        h = juce::jmax (r, h - 0.25f);    // trace des coupes récentes (~7 dB/s)
+        a = tIn > a ? a + inUp * (tIn - a) : juce::jmax (tIn, a - inFall);
+        r = tRed > r ? r + redUp * (tRed - r) : r + redDown * (tRed - r);
+        h = juce::jmax (r, h - holdFall);             // trace des coupes récentes (~7 dB/s)
     }
 
-    updateTracks (tHz.data(), tDb.data(), fresh ? tN : 0);
+    updateTracks (tHz.data(), tDb.data(), fresh ? tN : 0, dt);
     maxCutDb = proc.apvts.getRawParameterValue ("maxcut")->load();
     repaint();
 }
 
-void SpectrumDisplay::updateTracks (const float* hz, const float* db, int n)
+void SpectrumDisplay::updateTracks (const float* hz, const float* db, int n, float dt)
 {
-    for (auto& t : tracks) t.life = juce::jmax (0.0f, t.life - 0.07f);
+    const float k = dt * 30.0f;
+    const float hzK = 1.0f - std::pow (0.5f, k), dbK = 1.0f - std::pow (0.4f, k);
+    for (auto& t : tracks) t.life = juce::jmax (0.0f, t.life - 2.1f * dt);
     std::array<bool, 8> matched {};
     for (int i = 0; i < n; ++i)
     {
@@ -517,8 +541,8 @@ void SpectrumDisplay::updateTracks (const float* hz, const float* db, int n)
                 if (tracks[(size_t) j].life <= 0.0f && ! matched[(size_t) j]) { best = j; tracks[(size_t) j].hz = hz[i]; tracks[(size_t) j].db = 0.0f; break; }
         if (best < 0) continue;
         auto& t = tracks[(size_t) best];
-        t.hz = std::exp2 (0.5f * std::log2 (t.hz) + 0.5f * std::log2 (hz[i]));
-        t.db += 0.6f * (db[i] - t.db);
+        t.hz = std::exp2 (std::log2 (t.hz) + hzK * (std::log2 (hz[i]) - std::log2 (t.hz)));
+        t.db += dbK * (db[i] - t.db);
         t.life = 1.0f;
         matched[(size_t) best] = true;
     }
@@ -532,7 +556,9 @@ void SpectrumDisplay::drawTracking (juce::Graphics& g)
     std::sort (live.begin(), live.end(), [this] (int a, int b) { return tracks[(size_t) a].db > tracks[(size_t) b].db; });
     if (live.size() > 4) live.resize (4);
 
-    // points sur les creux suivis + fréquence discrète dessous
+    // points sur les creux suivis + fréquence discrète dessous (sans chevauchement :
+    // la résonance la plus coupée garde son étiquette)
+    std::vector<juce::Rectangle<float>> labelBoxes;
     for (int i : live)
     {
         const auto& t = tracks[(size_t) i];
@@ -540,9 +566,14 @@ void SpectrumDisplay::drawTracking (juce::Graphics& g)
         const float x = xForFreq (t.hz), y = yForRed (t.db);
         g.setColour (ui::accent.withAlpha (a));
         g.fillEllipse (juce::Rectangle<float> (6.0f, 6.0f).withCentre ({ x, y }));
+        const auto box = juce::Rectangle<float> (38.0f, 13.0f).withCentre ({ x, y + 12.0f });
+        bool overlaps = false;
+        for (const auto& b : labelBoxes) overlaps |= b.intersects (box);
+        if (overlaps) continue;
+        labelBoxes.push_back (box);
         g.setColour (ui::text.withAlpha (0.75f * a));
         g.setFont (ui::regular (10.5f));
-        g.drawText (shortFreq (t.hz), juce::Rectangle<float> (50.0f, 13.0f).withCentre ({ x, y + 12.0f }), juce::Justification::centred);
+        g.drawText (shortFreq (t.hz), box.expanded (6.0f, 0.0f), juce::Justification::centred);
     }
 
     // liste discrète en haut à droite
@@ -949,6 +980,14 @@ void SpectrumDisplay::showAddMenu (juce::Point<float> pos)
 // ============================================================================
 //  Potards, glissières, sélecteurs
 // ============================================================================
+// unité affichée après la valeur (« 5.0 ms », « 50% », « +1.5 dB »)
+static juce::String unitSuffix (const juce::RangedAudioParameter& p)
+{
+    const auto label = p.getLabel();
+    if (label.isEmpty() || p.getParameterID() == "focus") return {};
+    return label == "%" ? label : " " + label;
+}
+
 Knob::Knob()
 {
     slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
@@ -964,7 +1003,11 @@ void Knob::attach (VeloursProcessor& p, const juce::String& id, const juce::Stri
     size = sz;
     attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (p.apvts, id, slider);
     if (auto* prm = p.apvts.getParameter (id))
+    {
         slider.setDoubleClickReturnValue (true, (double) prm->convertFrom0to1 (prm->getDefaultValue()));
+        slider.setTextValueSuffix (unitSuffix (*prm));
+        slider.updateText();
+    }
     slider.getProperties().set ("accent", useAccent);
     slider.setTooltip (tip);
     auto* um = &p.undoManager;
@@ -1000,7 +1043,11 @@ void HSlider::attach (VeloursProcessor& p, const juce::String& id, const juce::S
     title = text;
     attachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (p.apvts, id, slider);
     if (auto* prm = p.apvts.getParameter (id))
+    {
         slider.setDoubleClickReturnValue (true, (double) prm->convertFrom0to1 (prm->getDefaultValue()));
+        slider.setTextValueSuffix (unitSuffix (*prm));
+        slider.updateText();
+    }
     slider.setTooltip (tip);
     auto* um = &p.undoManager;
     slider.onDragStart = [um] { um->beginNewTransaction(); };
@@ -1009,8 +1056,8 @@ void HSlider::attach (VeloursProcessor& p, const juce::String& id, const juce::S
 void HSlider::resized()
 {
     auto r = getLocalBounds();
-    r.removeFromLeft (58);
-    slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 46, 18);
+    r.removeFromLeft (52);
+    slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 58, 18);
     slider.setBounds (r);
 }
 
@@ -1018,7 +1065,7 @@ void HSlider::paint (juce::Graphics& g)
 {
     g.setColour (ui::dim);
     g.setFont (ui::caps (10.0f));
-    g.drawText (title, getLocalBounds().withWidth (56), juce::Justification::centredLeft);
+    g.drawText (title, getLocalBounds().withWidth (50), juce::Justification::centredLeft);
 }
 
 Segments::Segments (juce::RangedAudioParameter& param, const juce::StringArray& labels, juce::UndoManager* um)
@@ -1068,8 +1115,13 @@ void LevelReadout::timerCallback()
 {
     const float o = proc.engine.overallReductionDb.load();
     const float p = proc.engine.peakReductionDb.load();
+    const float m = proc.engine.makeupDbOut.load();
+    const bool gm = proc.apvts.getRawParameterValue ("gainMatch")->load() > 0.5f
+                    && proc.apvts.getRawParameterValue ("delta")->load() < 0.5f;
     overall += (o - overall) * 0.3f;
     peak += (p - peak) * (p > peak ? 0.6f : 0.12f);
+    makeup += (m - makeup) * 0.3f;
+    gainMatchOn = gm;
     repaint();
 }
 
@@ -1078,7 +1130,14 @@ void LevelReadout::paint (juce::Graphics& g)
     auto r = getLocalBounds().toFloat();
     g.setColour (ui::dim);
     g.setFont (ui::caps (9.5f));
-    g.drawText ("REDUCTION", r.removeFromTop (13.0f), juce::Justification::centredLeft);
+    auto titleRow = r.removeFromTop (13.0f);
+    g.drawText ("REDUCTION", titleRow, juce::Justification::centredLeft);
+    if (gainMatchOn)
+    {
+        g.setColour (ui::text.withAlpha (0.7f));
+        g.setFont (ui::regular (10.5f));
+        g.drawText ("+" + juce::String (juce::jmax (0.0f, makeup), 1), titleRow, juce::Justification::centredRight);
+    }
     auto row = r.removeFromTop (20.0f);
     g.setColour (ui::accent);
     g.setFont (ui::semi (16.0f));
@@ -1228,6 +1287,114 @@ void BandStrip::paint (juce::Graphics& g)
 }
 
 // ============================================================================
+//  Sauvegarde de preset (panneau intégré)
+// ============================================================================
+SaveOverlay::SaveOverlay()
+{
+    setVisible (false);
+    setWantsKeyboardFocus (false);
+    name.setFont (ui::regular (14.0f));
+    name.setJustification (juce::Justification::centredLeft);
+    name.setIndents (10, 0);
+    name.setInputRestrictions (60);
+    name.setSelectAllWhenFocused (true);
+    name.onReturnKey = [this] { commit(); };
+    name.onEscapeKey = [this] { hide(); };
+    name.onTextChange = [this] { updateHint(); };
+    addAndMakeVisible (name);
+
+    save.getProperties().set ("selectable", true);
+    save.setToggleState (true, juce::dontSendNotification);   // bouton principal, plein
+    for (auto* b : { &save, &cancel })
+    {
+        b->setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        addAndMakeVisible (b);
+    }
+    save.onClick = [this] { commit(); };
+    cancel.onClick = [this] { hide(); };
+}
+
+void SaveOverlay::show (const juce::String& initialName)
+{
+    name.setText (initialName, juce::dontSendNotification);
+    hintIsError = false;
+    updateHint();
+    setVisible (true);
+    toFront (false);
+    name.grabKeyboardFocus();
+    name.selectAll();
+}
+
+void SaveOverlay::hide()
+{
+    setVisible (false);
+}
+
+void SaveOverlay::updateHint()
+{
+    const auto clean = juce::File::createLegalFileName (name.getText().trim());
+    hintIsError = false;
+    if (clean.isEmpty())
+        hint = "Type a name";
+    else if (presets::userFolder().getChildFile (clean + ".velours").existsAsFile())
+        hint = "Replaces the existing user preset \"" + clean + "\"";
+    else
+        hint = "Saved in the user presets folder";
+    save.setEnabled (clean.isNotEmpty());
+    repaint();
+}
+
+void SaveOverlay::commit()
+{
+    if (! save.isEnabled()) return;
+    if (onSave != nullptr && onSave (name.getText()))
+        hide();
+    else
+    {
+        hint = "Could not write the preset file";
+        hintIsError = true;
+        repaint();
+    }
+}
+
+void SaveOverlay::mouseDown (const juce::MouseEvent& e)
+{
+    if (! card.contains (e.getPosition()))
+        hide();
+}
+
+void SaveOverlay::resized()
+{
+    card = getLocalBounds().withSizeKeepingCentre (380, 168);
+    auto r = card.reduced (20, 18);
+    r.removeFromTop (26);
+    name.setBounds (r.removeFromTop (34));
+    r.removeFromTop (28);
+    auto buttons = r.removeFromTop (30);
+    save.setBounds (buttons.removeFromRight (92));
+    buttons.removeFromRight (8);
+    cancel.setBounds (buttons.removeFromRight (92));
+}
+
+void SaveOverlay::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colours::black.withAlpha (0.55f));
+    const auto c = card.toFloat();
+    g.setColour (juce::Colours::black.withAlpha (0.4f));
+    g.fillRoundedRectangle (c.translated (0.0f, 4.0f).expanded (2.0f), 12.0f);
+    g.setColour (ui::panel);
+    g.fillRoundedRectangle (c, 10.0f);
+    g.setColour (ui::line);
+    g.drawRoundedRectangle (c.reduced (0.5f), 10.0f, 1.0f);
+    g.setColour (ui::text);
+    g.setFont (ui::caps (11.0f));
+    g.drawText ("SAVE PRESET", card.reduced (20, 18).removeFromTop (16), juce::Justification::centredLeft);
+    g.setColour (hintIsError ? ui::accent : ui::faint);
+    g.setFont (ui::regular (11.5f));
+    g.drawText (hint, juce::Rectangle<int> (name.getX(), name.getBottom() + 6, name.getWidth(), 16), juce::Justification::centredLeft);
+}
+
+// ============================================================================
 //  Panneau principal
 // ============================================================================
 Panel::Panel (VeloursProcessor& p) : proc (p), display (p), strip (p), level (p)
@@ -1272,6 +1439,9 @@ Panel::Panel (VeloursProcessor& p) : proc (p), display (p), strip (p), level (p)
     attachToggle (delta, "delta", "DELTA", "Listen only to what is being removed");
     attachToggle (bypass, "bypass", "BYPASS", "Bypass (latency compensated)");
     attachToggle (renderUltra, "renderUltra", "RENDER IN ULTRA", "Use Ultra quality automatically when bouncing / exporting");
+    attachToggle (gainMatch, "gainMatch", "GAIN MATCH",
+                  "Compensates the loudness removed by the processing (perceptual weighting, slow), "
+                  "so that bypass comparisons are fair. Off while Delta is on");
 
 
     addAndMakeVisible (level);
@@ -1291,6 +1461,7 @@ Panel::Panel (VeloursProcessor& p) : proc (p), display (p), strip (p), level (p)
     nextBtn.onClick = [this] { stepPreset (1); };
     saveBtn.onClick = [this] { savePresetDialog(); };
     saveBtn.setTooltip ("Save the current settings as a user preset");
+    presetBox.setTooltip ("Presets. A dot means the current settings differ from the loaded preset");
     slotA.onClick = [this] { proc.selectSlot (0); };
     slotB.onClick = [this] { proc.selectSlot (1); };
     copyBtn.onClick = [this] { proc.copyToOtherSlot(); };
@@ -1311,26 +1482,33 @@ Panel::Panel (VeloursProcessor& p) : proc (p), display (p), strip (p), level (p)
     // Moteur
     resolutionBox.addItemList (params::qualityNames, 1);
     resolutionAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (s, "quality", resolutionBox);
-    resolutionBox.setTooltip ("Frequency resolution / latency. Low Latency 21 ms, Normal 43 ms, High Res 85 ms");
+    resolutionBox.setTooltip ("Frequency resolution / latency. Low Latency 21 ms, Normal 43 ms, High Res 85 ms. "
+                              "Zero Latency: no delay at all (minimum-phase filtering, for tracking and live use)");
     qualityBox.addItemList (params::timeQualityNames, 1);
     qualityAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (s, "timeQuality", qualityBox);
     qualityBox.setTooltip ("Time resolution of the processing: Normal, High (2x CPU), Ultra (4x CPU). Latency is unchanged");
     addAndMakeVisible (resolutionBox);
     addAndMakeVisible (qualityBox);
 
-    const juce::StringArray scales { "75%", "100%", "125%", "150%" };
-    scaleBox.addItemList (scales, 1);
-    const float current = (float) (double) proc.apvts.state.getProperty ("uiScale", 1.0);
-    scaleBox.setSelectedId (current < 0.8f ? 1 : current < 1.1f ? 2 : current < 1.3f ? 3 : 4, juce::dontSendNotification);
+    scaleBox.addItemList ({ "75%", "100%", "125%", "150%", "175%", "200%" }, 1);
+    showScale ((float) (double) proc.apvts.state.getProperty ("uiScale", 1.0));
     scaleBox.onChange = [this]
     {
-        const float v[] = { 0.75f, 1.0f, 1.25f, 1.5f };
-        const float sc = v[juce::jlimit (0, 3, scaleBox.getSelectedId() - 1)];
-        proc.apvts.state.setProperty ("uiScale", sc, nullptr);
-        if (onScaleChange) onScaleChange (sc);
+        const float v[] = { 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
+        const int id = scaleBox.getSelectedId();
+        if (id >= 1 && id <= 6 && onScaleChange) onScaleChange (v[id - 1]);
     };
-    scaleBox.setTooltip ("Window size");
+    scaleBox.setTooltip ("Window size (you can also drag the bottom-right corner)");
     addAndMakeVisible (scaleBox);
+
+    // sauvegarde : panneau intégré, au-dessus de tout
+    saveOverlay.onSave = [this] (const juce::String& n)
+    {
+        if (! proc.saveUserPreset (n)) return false;
+        refreshPresetBox();
+        return true;
+    };
+    addChildComponent (saveOverlay);
 
     refreshPresetBox();
     startTimerHz (10);
@@ -1389,18 +1567,30 @@ void Panel::stepPreset (int step)
 
 void Panel::savePresetDialog()
 {
-    auto* w = new juce::AlertWindow ("Save preset", "Name of the preset:", juce::MessageBoxIconType::NoIcon, this);
-    w->setLookAndFeel (&lnf);
-    w->addTextEditor ("name", proc.getPresetName());
-    w->addButton ("SAVE", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    w->addButton ("CANCEL", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-    juce::Component::SafePointer<Panel> safe (this);
-    w->enterModalState (true, juce::ModalCallbackFunction::create ([safe, w] (int r)
+    saveOverlay.show (proc.getPresetName());
+}
+
+void Panel::showScale (float scale)
+{
+    const float v[] = { 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
+    for (int i = 0; i < 6; ++i)
+        if (std::abs (scale - v[i]) < 0.006f)
+        {
+            scaleBox.setSelectedId (i + 1, juce::dontSendNotification);
+            return;
+        }
+    scaleBox.setText (juce::String (juce::roundToInt (scale * 100.0f)) + "%", juce::dontSendNotification);
+}
+
+void Panel::paintOverChildren (juce::Graphics& g)
+{
+    if (presetModified && ! saveOverlay.isVisible())
     {
-        if (safe != nullptr && r == 1)
-            if (safe->proc.saveUserPreset (w->getTextEditorContents ("name")))
-                safe->refreshPresetBox();
-    }), true);
+        // pastille « modifié » dans le menu des presets, avant le chevron
+        const auto c = juce::Point<float> ((float) presetBox.getRight() - 30.0f, (float) presetBox.getBounds().getCentreY());
+        g.setColour (ui::accent);
+        g.fillEllipse (juce::Rectangle<float> (6.0f, 6.0f).withCentre (c));
+    }
 }
 
 void Panel::timerCallback()
@@ -1412,6 +1602,26 @@ void Panel::timerCallback()
     slotB.setToggleState (proc.getActiveSlot() == 1, juce::dontSendNotification);
     undoBtn.setEnabled (proc.undoManager.canUndo());
     redoBtn.setEnabled (proc.undoManager.canRedo());
+
+    const bool modified = proc.isPresetModified();
+    if (modified != presetModified)
+    {
+        presetModified = modified;
+        repaint (presetBox.getBounds().expanded (2));
+    }
+
+    // latence affichée à côté de RESOLUTION
+    juce::String lat;
+    if (proc.getSampleRate() > 0.0)
+    {
+        const double ms = 1000.0 * proc.getLatencySamples() / proc.getSampleRate();
+        lat = ms < 0.05 ? juce::String ("0 ms") : (ms < 10.0 ? juce::String (ms, 1) : juce::String (juce::roundToInt (ms))) + " ms";
+    }
+    if (lat != latencyText)
+    {
+        latencyText = lat;
+        repaint (resolutionBox.getBounds().translated (0, -16).withHeight (13));
+    }
 
 
     const bool scOn = proc.apvts.getRawParameterValue ("sidechain")->load() > 0.5f;
@@ -1484,11 +1694,18 @@ void Panel::paint (juce::Graphics& g)
     // pied de page
     g.setColour (ui::line);
     g.drawHorizontalLine (footerArea.getY(), 0.0f, (float) baseW);
-    for (int x : { 226, 736 })
+    for (int x : { 210, 770 })
         g.drawVerticalLine (x, (float) footerArea.getY() + 16.0f, (float) footerArea.getBottom() - 16.0f);
     g.setColour (ui::dim);
     g.setFont (ui::caps (9.5f));
-    g.drawText ("RESOLUTION", resolutionBox.getBounds().translated (0, -16).withHeight (13), juce::Justification::centredLeft);
+    const auto resTitle = resolutionBox.getBounds().translated (0, -16).withHeight (13);
+    g.drawText ("RESOLUTION", resTitle, juce::Justification::centredLeft);
+    if (latencyText.isNotEmpty())
+    {
+        g.setColour (ui::faint);
+        g.setFont (ui::regular (10.0f));
+        g.drawText (latencyText, resTitle, juce::Justification::centredRight);
+    }
     g.drawText ("QUALITY", qualityBox.getBounds().translated (0, -16).withHeight (13), juce::Justification::centredLeft);
 }
 
@@ -1552,14 +1769,17 @@ void Panel::resized()
     // pied de page
     {
         const int cy = footerArea.getCentreY();
-        bypass.setBounds (20, cy - 15, 96, 30);
-        delta.setBounds (124, cy - 15, 86, 30);
-        mix.setBounds (244, cy - 15, 232, 30);
-        output.setBounds (490, cy - 15, 232, 30);
-        level.setBounds (752, cy - 20, 104, 40);
-        resolutionBox.setBounds (baseW - 16 - 92 - 8 - 120, cy - 6, 120, 26);
-        qualityBox.setBounds (baseW - 16 - 92, cy - 6, 92, 26);
+        bypass.setBounds (16, cy - 15, 92, 30);
+        delta.setBounds (114, cy - 15, 82, 30);
+        mix.setBounds (224, cy - 15, 200, 30);
+        output.setBounds (434, cy - 15, 200, 30);
+        gainMatch.setBounds (646, cy - 15, 112, 30);
+        level.setBounds (784, cy - 20, 92, 40);
+        qualityBox.setBounds (baseW - 14 - 84, cy - 6, 84, 26);
+        resolutionBox.setBounds (qualityBox.getX() - 8 - 112, cy - 6, 112, 26);
     }
+
+    saveOverlay.setBounds (getLocalBounds());
 }
 
 // ============================================================================
@@ -1568,10 +1788,18 @@ void Panel::resized()
 VeloursEditor::VeloursEditor (VeloursProcessor& p)
     : AudioProcessorEditor (&p), proc (p), panel (p)
 {
+    const float stored = (float) (double) proc.apvts.state.getProperty ("uiScale", 1.0);
     setLookAndFeel (&panel.getLookAndFeel());   // infobulles au style Velours
     addAndMakeVisible (panel);
     panel.onScaleChange = [this] (float s) { applyScale (s); };
-    applyScale ((float) (double) proc.apvts.state.getProperty ("uiScale", 1.0));
+
+    // fenêtre redimensionnable, proportions fixes (coin en bas à droite ou bord de la fenêtre hôte)
+    setResizable (true, true);
+    setResizeLimits (juce::roundToInt (Panel::baseW * minScale), juce::roundToInt (Panel::baseH * minScale),
+                     juce::roundToInt (Panel::baseW * maxScale), juce::roundToInt (Panel::baseH * maxScale));
+    if (auto* c = getConstrainer())
+        c->setFixedAspectRatio ((double) Panel::baseW / (double) Panel::baseH);
+    applyScale (stored);
 }
 
 VeloursEditor::~VeloursEditor()
@@ -1581,12 +1809,15 @@ VeloursEditor::~VeloursEditor()
 
 void VeloursEditor::applyScale (float s)
 {
-    scale = juce::jlimit (0.75f, 1.5f, s);
-    panel.setTransform (juce::AffineTransform::scale (scale));
-    setSize (juce::roundToInt (Panel::baseW * scale), juce::roundToInt (Panel::baseH * scale));
+    s = juce::jlimit (minScale, maxScale, std::isfinite (s) ? s : 1.0f);
+    setSize (juce::roundToInt (Panel::baseW * s), juce::roundToInt (Panel::baseH * s));
 }
 
 void VeloursEditor::resized()
 {
+    scale = juce::jlimit (minScale, maxScale, (float) getWidth() / (float) Panel::baseW);
+    panel.setTransform (juce::AffineTransform::scale (scale));
     panel.setBounds (0, 0, Panel::baseW, Panel::baseH);
+    proc.apvts.state.setProperty ("uiScale", scale, nullptr);
+    panel.showScale (scale);
 }

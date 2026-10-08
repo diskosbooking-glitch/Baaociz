@@ -54,6 +54,10 @@ public:
 
     juce::UndoManager undoManager;
 
+    // Le réglage courant diffère-t-il du dernier preset chargé ?
+    bool isPresetModified() const;
+    void capturePresetSnapshot();
+
     // Bandes courantes (lecture interface)
     std::array<bands::Band, params::numBands> readBands() const;
 
@@ -82,6 +86,7 @@ private:
     juce::AudioParameterBool* bypassParam = nullptr;
     int currentProgram = 0;
     juce::ValueTree slots[2];
+    std::vector<float> presetSnapshot;
     int activeSlot = 0;
     void applyStateValues (const juce::ValueTree& tree);
 
@@ -91,7 +96,7 @@ private:
     std::atomic<float>* raw (const char* id) const { return apvts.getRawParameterValue (id); }
     std::atomic<float> *pDepth, *pDetail, *pAttack, *pRelease, *pMaxCut, *pMode, *pDetailTilt, *pTimeTilt,
                        *pStereo, *pLink, *pSidechain, *pMix, *pWetTrim, *pOutput, *pDelta, *pBypass, *pQuality, *pReleaseTilt,
-                       *pTimeQuality, *pRenderUltra, *pFocus;
+                       *pTimeQuality, *pRenderUltra, *pFocus, *pGainMatch;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VeloursProcessor)
 };

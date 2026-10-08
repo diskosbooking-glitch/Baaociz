@@ -5,8 +5,9 @@
 #include "PluginProcessor.h"
 
 // ----------------------------------------------------------------------------
-//  Velours v0.3 — interface sobre : gris profond, un seul accent « velours »,
-//  typographie Inter, grand graphe de réduction au centre.
+//  Velours v1.0 — interface sobre : gris profond, un seul accent « velours »,
+//  typographie Inter, grand graphe de réduction au centre. Fenêtre
+//  redimensionnable (proportions fixes), affichage fluide à 60 images/s.
 // ----------------------------------------------------------------------------
 namespace ui
 {
@@ -51,6 +52,7 @@ public:
     void drawPopupMenuBackground (juce::Graphics&, int w, int h) override;
     void drawTooltip (juce::Graphics&, const juce::String&, int w, int h) override;
     juce::Rectangle<int> getTooltipBounds (const juce::String&, juce::Point<int>, juce::Rectangle<int>) override;
+    void drawCornerResizer (juce::Graphics&, int w, int h, bool isMouseOver, bool isMouseDragging) override;
 
 private:
     juce::Typeface::Ptr interRegular, interSemi;
@@ -100,7 +102,7 @@ private:
     void showBandMenu (int band);
     void showAddMenu (juce::Point<float>);
     void rebuildCurves();
-    void updateTracks (const float* hz, const float* db, int n);
+    void updateTracks (const float* hz, const float* db, int n, float dt);
     void drawTracking (juce::Graphics&);
 
     VeloursProcessor& proc;
@@ -114,6 +116,7 @@ private:
     int mappedBins = -1;
     float mappedBinHz = 0.0f;
     int lastCounter = -1;
+    double lastTick = 0.0, lastFresh = 0.0;     // secondes (lissage indépendant de la cadence)
 
     std::vector<float> sensCurve[2];
     bool curvesDiffer = false;
@@ -171,16 +174,47 @@ private:
     std::unique_ptr<juce::ParameterAttachment> attachment;
 };
 
-class LevelReadout : public juce::Component, private juce::Timer
+class LevelReadout : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
 {
 public:
-    explicit LevelReadout (VeloursProcessor& p) : proc (p) { startTimerHz (20); }
+    explicit LevelReadout (VeloursProcessor& p) : proc (p)
+    {
+        setTooltip ("Average level reduction (bar: peak cut). With Gain Match on, the makeup gain is shown at the top right");
+        startTimerHz (20);
+    }
     ~LevelReadout() override { stopTimer(); }
     void paint (juce::Graphics&) override;
 private:
     void timerCallback() override;
     VeloursProcessor& proc;
-    float overall = 0.0f, peak = 0.0f;
+    float overall = 0.0f, peak = 0.0f, makeup = 0.0f;
+    bool gainMatchOn = false;
+};
+
+// ----------------------------------------------------------------------------
+//  Sauvegarde d'un preset : panneau intégré (pas de fenêtre modale, plus sûr
+//  dans les hôtes AU / VST3)
+// ----------------------------------------------------------------------------
+class SaveOverlay : public juce::Component
+{
+public:
+    SaveOverlay();
+    void show (const juce::String& initialName);
+    void hide();
+    std::function<bool (const juce::String&)> onSave;    // renvoie false si l'écriture échoue
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    void commit();
+    void updateHint();
+    juce::TextEditor name;
+    juce::TextButton save { "SAVE" }, cancel { "CANCEL" };
+    juce::Rectangle<int> card;
+    juce::String hint;
+    bool hintIsError = false;
 };
 
 // ----------------------------------------------------------------------------
@@ -221,6 +255,8 @@ public:
     void resized() override;
 
     std::function<void (float)> onScaleChange;
+    void showScale (float scale);                     // synchronise le menu de taille
+    void paintOverChildren (juce::Graphics&) override;
 
 private:
     void timerCallback() override;
@@ -240,7 +276,7 @@ private:
     Knob detailTilt, attackTilt, releaseTilt, maxCut, wetTrim, link, focus;
     HSlider mix, output;
     std::unique_ptr<Segments> modeSeg, stereoSeg;
-    juce::ToggleButton sidechain, delta, bypass, renderUltra;
+    juce::ToggleButton sidechain, delta, bypass, renderUltra, gainMatch;
     std::vector<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>> buttonAttachments;
     LevelReadout level;
     juce::Label scInfo;
@@ -251,6 +287,9 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> resolutionAtt, qualityAtt;
     juce::String shownPreset;
     juce::Array<juce::File> userFiles;
+    bool presetModified = false;
+    juce::String latencyText;
+    SaveOverlay saveOverlay;
 
     juce::Rectangle<int> leftArea, rightArea, footerArea, topArea;
 };
@@ -262,6 +301,8 @@ public:
     explicit VeloursEditor (VeloursProcessor&);
     ~VeloursEditor() override;
     void resized() override;
+
+    static constexpr float minScale = 0.6f, maxScale = 2.0f;
 
 private:
     void applyScale (float);
